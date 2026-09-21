@@ -5,11 +5,11 @@ Three display modes (per bridge, default from global settings)::
     simple    张三
               你好
 
-    standard  QQ · 张三
+    standard  TG · 张三
 
               你好
 
-    full      QQ · Minecraft 玩家群 · 张三
+    full      TG · Minecraft 玩家群 · 张三
               2026-09-21 11:32
 
               你好
@@ -21,12 +21,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ..models import PLATFORM_LABEL, UnifiedMessage
+from ..models import UnifiedMessage, platform_label
 
 
 @dataclass
 class Rendered:
-    text: str  # plain text (QQ)
+    text: str  # plain text
     html: str  # HTML (Telegram)
 
 
@@ -39,7 +39,7 @@ def _time_str(ts: float, tz_name: str) -> str:
 
 
 def _header(msg: UnifiedMessage, mode: str, tz_name: str) -> list[str]:
-    label = PLATFORM_LABEL.get(msg.platform, msg.platform.upper())
+    label = platform_label(msg.platform)
     name = msg.sender.name or msg.sender.id
     if mode == "simple":
         return [name]
@@ -56,7 +56,7 @@ def render(msg: UnifiedMessage, mode: str = "standard", tz_name: str = "Asia/Sha
            body_override: str | None = None) -> Rendered:
     body = msg.text if body_override is None else body_override
     if msg.event:
-        label = PLATFORM_LABEL.get(msg.platform, msg.platform.upper())
+        label = platform_label(msg.platform)
         text = f"{label} · 系统\n{body}" if mode != "simple" else body
         return Rendered(text=text, html=f"<i>{html.escape(text)}</i>")
 

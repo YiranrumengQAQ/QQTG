@@ -9,13 +9,10 @@ import os
 import platform as py_platform
 import shutil
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 from .. import __version__
 from ..adapters.base import BaseAdapter, PermissionReport
-from ..adapters.onebot import OneBotAdapter
-from ..adapters.qqbot import QQOfficialAdapter
 from ..adapters.telegram import TelegramAdapter
 from ..config import Config
 from ..db import Database
@@ -23,11 +20,14 @@ from ..logsys import db_handler, get_logger
 from ..media.ffmpeg import FFmpeg
 from ..media.processor import MediaProcessor
 from ..media.storage import TempStorage
-from ..models import PLATFORM_LABEL, PLATFORM_QQ, PLATFORM_TG, BridgeError
-from ..qqbotqr import QQQRSession
-from ..security import SecretBox, hash_password, mask_secret, new_token, sha256_hex, sign_media_token
+from ..models import PLATFORM_TG, BridgeError, platform_label
+from ..security import SecretBox, hash_password, mask_secret, new_token, sha256_hex
 from ..settings import Settings
 from .engine import BridgeEngine, merge_options
+
+# Platforms with a built-in adapter.  A future platform only needs to register
+# its adapter factory here – the data model (chats / A↔B bridges) is generic.
+ADAPTER_PLATFORMS = (PLATFORM_TG,)
 
 log = get_logger("system")
 clog = get_logger("conn")
@@ -50,7 +50,6 @@ class BridgeApp:
         self.engine: BridgeEngine | None = None
         self._adapter_lock = asyncio.Lock()
         self._maintenance: asyncio.Task | None = None
-        self.qq_qr = QQQRSession()
         self.started_at = 0.0
 
     # ------------------------------------------------------------ lifecycle
@@ -67,7 +66,7 @@ class BridgeApp:
         self.engine = BridgeEngine(self.db, self.settings, self.processor, self.storage)
         await self.engine.start()
         self.started_at = time.time()
-        log.info("QQTG Bridge v%s 启动 (home=%s)", __version__, self.cfg.home)
+        log.info("Rain Bridge v%s 启动 (home=%s)", __version__, self.cfg.home)
         if with_adapters:
             await self.start_adapters()
         self._maintenance = asyncio.create_task(self._maintenance_loop())
@@ -75,7 +74,6 @@ class BridgeApp:
     async def stop(self) -> None:
         if self._maintenance:
             self._maintenance.cancel()
-        await self.qq_qr.cancel()
         if self.engine:
             for adapter in list(self.engine.adapters.values()):
                 try:
@@ -143,23 +141,24 @@ class BridgeApp:
             cfg = row["config"]
             if platform == PLATFORM_TG:
                 out["config"] = {"token_masked": mask_secret(cfg.get("token", "")), "api_base": cfg.get("api_base", "")}
-            elif cfg.get("kind") == "official":
-                out["config"] = {"kind": "official", "app_id": cfg.get("app_id", ""),
-                                 "app_secret_masked": mask_secret(cfg.get("app_secret", "")),
-                                 "api_base": cfg.get("api_base", "")}
             else:
-                out["config"] = {"kind": "onebot", "mode": cfg.get("mode", "forward"), "ws_url": cfg.get("ws_url", ""),
-                                 "access_token_masked": mask_secret(cfg.get("access_token", ""))}
+                # Generic masking for future adapters: hide anything that looks secret.
+                out["config"] = {k: (mask_secret(str(v)) if any(s in k for s in ("token", "secret", "password")) else v)
+                                 for k, v in cfg.items()}
             out["self_id"] = row.get("self_id")
             out["self_name"] = row.get("self_name")
         return out
 
     async def start_adapters(self) -> None:
-        for platform in (PLATFORM_QQ, PLATFORM_TG):
+        for platform in await self._configd_platforms():
             try:
                 await self.start_adapter(platform)
             except Exception as exc:
-                clog.error("%s 连接启动失败: %s", PLATFORM_LABEL[platform], exc)
+                clog.error("%s 连接启动失败: %s", platform_label(platform), exc)
+
+    async def _configd_platforms(self) -> list[str]:
+        rows = await self.db.fetchall("SELECT DISTINCT platform FROM connections WHERE enabled=1")
+        return [r["platform"] for r in rows] or []
 
     def _build_adapter(self, platform: str, cfg: dict[str, Any]) -> BaseAdapter:
         if platform == PLATFORM_TG:
@@ -169,57 +168,7 @@ class BridgeApp:
                                 rate_chat_per_min=float(self.settings.get("tg_rate_per_chat_per_min", 20)))
             a.bridge_other_bots = bool(self.settings.get("bridge_other_bots", False))
             return a
-        if cfg.get("kind") == "official":
-            return QQOfficialAdapter(cfg.get("app_id", ""), cfg.get("app_secret", ""), api_base=cfg.get("api_base", ""),
-                                     public_base=self.effective_public_base(),
-                                     rate_chat_per_sec=float(self.settings.get("qqbot_rate_per_chat_per_sec", 0.33)),
-                                     media_url_maker=self.make_media_url)
-        return OneBotAdapter(cfg.get("mode", "forward"), cfg.get("ws_url", "ws://127.0.0.1:3001"), cfg.get("access_token", ""),
-                             rate_chat_per_sec=float(self.settings.get("qq_rate_per_chat_per_sec", 1.5)))
-
-    # ------------------------------------------------------ official QQ bot
-    def effective_public_base(self) -> str:
-        """Public base URL used when handing media to the official QQ servers."""
-        return str(self.settings.get("public_media_base") or self.cfg.public_url or "").strip().rstrip("/")
-
-    def make_media_url(self, absolute_path: str, name: str, ttl_sec: int) -> str:
-        """Signed, expiring URL the QQ servers can fetch for rich media upload."""
-        from urllib.parse import quote
-        base = self.effective_public_base()
-        if not base:
-            raise BridgeError("MEDIA_NO_PUBLIC_URL", "未配置公网地址，官方机器人无法发送媒体", permanent=True)
-        try:
-            rel = str(Path(absolute_path).resolve().relative_to(self.cfg.tmp_dir.resolve()))
-        except ValueError as exc:
-            raise BridgeError("MEDIA_NO_PUBLIC_URL", "媒体文件不在临时目录内", permanent=True) from exc
-        expires = int(time.time()) + max(60, ttl_sec)
-        sig = sign_media_token(self._require_secret_key(), rel, expires, name)
-        return f"{base}/qqbot/media?p={quote(rel)}&e={expires}&n={quote(name)}&s={sig}"
-
-    def _require_secret_key(self) -> str:
-        if not self.cfg.secret_key:
-            raise BridgeError("NO_SECRET", "QQTG_SECRET_KEY 未配置", permanent=True)
-        return self.cfg.secret_key
-
-    async def test_qqbot_credentials(self, app_id: str, app_secret: str, api_base: str = "") -> dict[str, Any]:
-        adapter = QQOfficialAdapter(app_id, app_secret, api_base=api_base)
-        try:
-            me = await adapter.me()
-            return {"ok": True, "id": me.get("id"), "username": me.get("username"), "avatar": me.get("avatar", "")}
-        except BridgeError as exc:
-            return {"ok": False, "error": exc.message}
-        finally:
-            if adapter._http:
-                await adapter._http.aclose()
-
-    async def save_qqbot_official(self, app_id: str, app_secret: str, api_base: str = "") -> dict[str, Any]:
-        test = await self.test_qqbot_credentials(app_id, app_secret, api_base)
-        if not test.get("ok"):
-            raise BridgeError("UNAUTHORIZED", str(test.get("error") or "AppID/AppSecret 验证失败"), permanent=True)
-        await self.save_connection(PLATFORM_QQ, {"kind": "official", "app_id": app_id, "app_secret": app_secret,
-                                                 "api_base": api_base}, name=str(test.get("username") or "QQ 官方机器人"))
-        await self.start_adapter(PLATFORM_QQ)
-        return test
+        raise BridgeError("NO_ADAPTER", f"平台 {platform} 暂无内置适配器", permanent=True)
 
     async def start_adapter(self, platform: str) -> Optional[BaseAdapter]:
         assert self.engine
@@ -229,16 +178,12 @@ class BridgeApp:
             if not row or not row["enabled"] or not row["config"]:
                 return None
             adapter = self._build_adapter(platform, row["config"])
-            if platform == PLATFORM_QQ and hasattr(adapter, "seed_chats"):
-                known = await self.db.fetchall(
-                    "SELECT chat_id, title FROM chats WHERE platform=? AND status NOT IN ('rejected','disabled')", (PLATFORM_QQ,))
-                adapter.seed_chats(known)
             self.engine.register_adapter(adapter)
             try:
                 await adapter.start()
             except BridgeError as exc:
                 adapter.last_error = exc.message
-                clog.error("%s 连接失败: %s", PLATFORM_LABEL[platform], exc.message)
+                clog.error("%s 连接失败: %s", platform_label(platform), exc.message)
                 if exc.code == "UNAUTHORIZED":
                     return adapter
                 # keep the adapter registered; it will retry in its own loop where applicable
@@ -255,7 +200,7 @@ class BridgeApp:
             await asyncio.sleep(delay)
             try:
                 await adapter.start()
-                clog.info("%s 已连接（重试成功）", PLATFORM_LABEL[platform])
+                clog.info("%s 已连接（重试成功）", platform_label(platform))
                 row = await self.get_connection(platform)
                 if row and adapter.self_id:
                     await self.db.update("connections", {"self_id": adapter.self_id, "self_name": adapter.self_name}, "id=?", (row["id"],))
@@ -297,16 +242,16 @@ class BridgeApp:
             rows = await self.db.fetchall("SELECT * FROM chats WHERE platform=? ORDER BY status='pending' DESC, title", (platform,))
         else:
             rows = await self.db.fetchall("SELECT * FROM chats ORDER BY platform, status='pending' DESC, title")
-        bridges = await self.db.fetchall("SELECT id, name, qq_chat_id, tg_chat_id FROM bridges")
+        bridges = await self.db.fetchall("SELECT id, name, a_chat_id, b_chat_id FROM bridges")
         by_chat: dict[int, list[dict[str, Any]]] = {}
         for b in bridges:
-            by_chat.setdefault(b["qq_chat_id"], []).append({"id": b["id"], "name": b["name"]})
-            by_chat.setdefault(b["tg_chat_id"], []).append({"id": b["id"], "name": b["name"]})
+            by_chat.setdefault(b["a_chat_id"], []).append({"id": b["id"], "name": b["name"]})
+            by_chat.setdefault(b["b_chat_id"], []).append({"id": b["id"], "name": b["name"]})
         for r in rows:
             r["status_label"] = CHAT_STATUS_LABEL.get(r["status"], r["status"])
             r["permissions"] = json.loads(r.get("permissions") or "{}")
             r["bridges"] = by_chat.get(r["id"], [])
-            r["platform_label"] = PLATFORM_LABEL.get(r["platform"], r["platform"])
+            r["platform_label"] = platform_label(r["platform"])
         return rows
 
     async def refresh_chats(self) -> dict[str, int]:
@@ -332,7 +277,7 @@ class BridgeApp:
         assert self.engine
         adapter = self.engine.adapter(chat_row["platform"])
         if not adapter:
-            report = PermissionReport(ok=False, present=False, reason=f"{PLATFORM_LABEL[chat_row['platform']]} 未配置", status="error")
+            report = PermissionReport(ok=False, present=False, reason=f"{platform_label(chat_row['platform'])} 未配置", status="error")
         else:
             report = await adapter.check_permissions(str(chat_row["chat_id"]))
             if chat_row["platform"] == PLATFORM_TG and report.present:
@@ -372,36 +317,38 @@ class BridgeApp:
     # --------------------------------------------------------------- bridges
     async def list_bridges(self) -> list[dict[str, Any]]:
         rows = await self.db.fetchall(
-            """SELECT b.*, q.chat_id AS qq_chat, q.title AS qq_title, q.status AS qq_status, q.member_count AS qq_members,
-                      t.chat_id AS tg_chat, t.title AS tg_title, t.status AS tg_status, t.member_count AS tg_members
-               FROM bridges b JOIN chats q ON q.id=b.qq_chat_id JOIN chats t ON t.id=b.tg_chat_id ORDER BY b.id""")
+            """SELECT b.*, ca.chat_id AS a_chat, ca.platform AS a_platform, ca.title AS a_title, ca.status AS a_status, ca.member_count AS a_members,
+                      cb.chat_id AS b_chat, cb.platform AS b_platform, cb.title AS b_title, cb.status AS b_status, cb.member_count AS b_members
+               FROM bridges b JOIN chats ca ON ca.id=b.a_chat_id JOIN chats cb ON cb.id=b.b_chat_id ORDER BY b.id""")
         today = time.strftime("%Y-%m-%d")
         stats = await self.db.fetchall("SELECT bridge_id, direction, SUM(sent) AS sent, SUM(failed) AS failed, "
                                        "SUM(CASE WHEN kind!='text' THEN sent ELSE 0 END) AS media FROM stats_daily WHERE day=? GROUP BY bridge_id, direction", (today,))
         by_bridge: dict[int, dict[str, Any]] = {}
         for s in stats:
-            d = by_bridge.setdefault(s["bridge_id"], {"sent": 0, "failed": 0, "media": 0, "qq_to_tg": 0, "tg_to_qq": 0})
+            d = by_bridge.setdefault(s["bridge_id"], {"sent": 0, "failed": 0, "media": 0, "a_to_b": 0, "b_to_a": 0})
             d["sent"] += s["sent"] or 0
             d["failed"] += s["failed"] or 0
             d["media"] += s["media"] or 0
             d[s["direction"]] += s["sent"] or 0
         for r in rows:
             r["options"] = merge_options(json.loads(r.get("options") or "{}"))
-            r["today"] = by_bridge.get(r["id"], {"sent": 0, "failed": 0, "media": 0, "qq_to_tg": 0, "tg_to_qq": 0})
+            r["a_platform_label"] = platform_label(r.get("a_platform") or "")
+            r["b_platform_label"] = platform_label(r.get("b_platform") or "")
+            r["today"] = by_bridge.get(r["id"], {"sent": 0, "failed": 0, "media": 0, "a_to_b": 0, "b_to_a": 0})
             r["warnings"] = self._bridge_warnings(r)
         return rows
 
     def _bridge_warnings(self, r: dict[str, Any]) -> list[str]:
         w: list[str] = []
-        for side, label in (("qq", "QQ"), ("tg", "TG")):
+        for side in ("a", "b"):
             st = r.get(f"{side}_status")
             if st in ("left", "limited", "error", "rejected", "disabled"):
-                w.append(f"{label} {CHAT_STATUS_LABEL.get(st, st)}")
+                w.append(f"{r.get(f'{side}_platform_label') or side.upper()} {CHAT_STATUS_LABEL.get(st, st)}")
         if self.engine:
-            for platform, label in ((PLATFORM_QQ, "QQ"), (PLATFORM_TG, "TG")):
+            for platform in {p for p in (r.get("a_platform"), r.get("b_platform")) if p}:
                 a = self.engine.adapter(platform)
                 if not a or not a.connected:
-                    w.append(f"{label} 未连接")
+                    w.append(f"{platform_label(platform)} 未连接")
         if r.get("today", {}).get("failed"):
             w.append(f"今日 {r['today']['failed']} 条失败")
         return w
@@ -412,31 +359,35 @@ class BridgeApp:
                 return b
         return None
 
-    async def create_bridge(self, name: str, qq_chat_row_id: int, tg_chat_row_id: int, direction: str = "both",
+    async def create_bridge(self, name: str, a_chat_row_id: int, b_chat_row_id: int, direction: str = "both",
                             options: dict[str, Any] | None = None, enabled: bool = False) -> int:
-        if direction not in ("both", "qq_to_tg", "tg_to_qq"):
+        if direction not in ("both", "a_to_b", "b_to_a"):
             raise ValueError("无效方向")
-        qq = await self.db.fetchone("SELECT * FROM chats WHERE id=? AND platform=?", (qq_chat_row_id, PLATFORM_QQ))
-        tg = await self.db.fetchone("SELECT * FROM chats WHERE id=? AND platform=?", (tg_chat_row_id, PLATFORM_TG))
-        if not qq or not tg:
-            raise ValueError("请选择有效的 QQ 群和 Telegram 群")
-        dup = await self.db.fetchone("SELECT id FROM bridges WHERE qq_chat_id=? AND tg_chat_id=?", (qq_chat_row_id, tg_chat_row_id))
+        if a_chat_row_id == b_chat_row_id:
+            raise ValueError("两端不能是同一个群")
+        ca = await self.db.fetchone("SELECT * FROM chats WHERE id=?", (a_chat_row_id,))
+        cb = await self.db.fetchone("SELECT * FROM chats WHERE id=?", (b_chat_row_id,))
+        if not ca or not cb:
+            raise ValueError("请选择有效的群组")
+        dup = await self.db.fetchone(
+            "SELECT id FROM bridges WHERE (a_chat_id=? AND b_chat_id=?) OR (a_chat_id=? AND b_chat_id=?)",
+            (a_chat_row_id, b_chat_row_id, b_chat_row_id, a_chat_row_id))
         if dup:
             raise ValueError("这两个群之间已经存在桥接")
         opts = merge_options(options)
         if "event_sync" not in (options or {}):
             opts["event_sync"] = bool(self.settings.get("event_sync_default", False))
         now = time.time()
-        bridge_id = await self.db.insert("bridges", {"name": name.strip() or f"{qq['title']} ↔ {tg['title']}", "enabled": 1 if enabled else 0,
-                                                     "direction": direction, "qq_chat_id": qq_chat_row_id, "tg_chat_id": tg_chat_row_id,
+        bridge_id = await self.db.insert("bridges", {"name": name.strip() or f"{ca['title']} ↔ {cb['title']}", "enabled": 1 if enabled else 0,
+                                                     "direction": direction, "a_chat_id": a_chat_row_id, "b_chat_id": b_chat_row_id,
                                                      "options": json.dumps(opts, ensure_ascii=False), "created_at": now, "updated_at": now})
         # creating a bridge from the panel implies authorization of both chats
-        for row in (qq, tg):
+        for row in (ca, cb):
             if row["status"] in ("discovered", "pending"):
                 await self.db.update("chats", {"status": "authorized", "status_reason": "", "updated_at": now}, "id=?", (row["id"],))
         if self.engine:
             await self.engine.reload_routes()
-        log.info("创建桥接 #%d: %s (%s ↔ %s)", bridge_id, name, qq["title"], tg["title"])
+        log.info("创建桥接 #%d: %s (%s ↔ %s)", bridge_id, name, ca["title"], cb["title"])
         return bridge_id
 
     async def update_bridge(self, bridge_id: int, **fields: Any) -> None:
@@ -444,7 +395,7 @@ class BridgeApp:
         if "name" in fields and fields["name"] is not None:
             values["name"] = str(fields["name"]).strip()[:100]
         if "direction" in fields and fields["direction"] is not None:
-            if fields["direction"] not in ("both", "qq_to_tg", "tg_to_qq"):
+            if fields["direction"] not in ("both", "a_to_b", "b_to_a"):
                 raise ValueError("无效方向")
             values["direction"] = fields["direction"]
         if "enabled" in fields and fields["enabled"] is not None:
@@ -472,41 +423,43 @@ class BridgeApp:
 
     async def verify_bridge(self, bridge: dict[str, Any]) -> dict[str, Any]:
         """Permission check on both sides (used before enabling a bridge)."""
-        qq_row = await self.db.fetchone("SELECT * FROM chats WHERE id=?", (bridge["qq_chat_id"],))
-        tg_row = await self.db.fetchone("SELECT * FROM chats WHERE id=?", (bridge["tg_chat_id"],))
         result: dict[str, Any] = {}
-        for label, row in (("qq", qq_row), ("tg", tg_row)):
+        for side in ("a", "b"):
+            row = await self.db.fetchone("SELECT * FROM chats WHERE id=?", (bridge[f"{side}_chat_id"],))
             if not row:
-                result[label] = {"ok": False, "reason": "群不存在"}
+                result[side] = {"ok": False, "reason": "群不存在"}
                 continue
             rep = await self.check_chat(row)
-            result[label] = {"ok": rep.ok, "present": rep.present, "muted": rep.muted, "checks": rep.checks, "reason": rep.reason}
-        result["ok"] = bool(result["qq"].get("ok") and result["tg"].get("ok"))
+            result[side] = {"ok": rep.ok, "present": rep.present, "muted": rep.muted, "checks": rep.checks, "reason": rep.reason}
+        result["ok"] = bool(result["a"].get("ok") and result["b"].get("ok"))
         return result
 
     # ---------------------------------------------------------------- health
     async def health(self) -> dict[str, Any]:
         assert self.engine
-        qq = self.engine.adapter(PLATFORM_QQ)
-        tg = self.engine.adapter(PLATFORM_TG)
+        adapters = dict(self.engine.adapters)
         storage = self.storage.status()
         ffmpeg_ok = self.ffmpeg.available()
-        components = {
-            "qq": {"ok": bool(qq and qq.connected), "label": "QQ Adapter", "detail": (qq.last_error if qq and not qq.connected else "") or ("未配置" if not qq else "")},
-            "telegram": {"ok": bool(tg and tg.connected), "label": "Telegram API", "detail": (tg.last_error if tg and not tg.connected else "") or ("未配置" if not tg else "")},
+        components: dict[str, Any] = {
             "database": {"ok": await self.db.ping(), "label": "Database", "detail": str(self.cfg.db_path)},
             "media_worker": {"ok": ffmpeg_ok and not storage["paused"], "label": "Media Worker", "detail": "FFmpeg 缺失" if not ffmpeg_ok else ("磁盘不足已暂停" if storage["paused"] else "")},
             "queue": {"ok": self.engine.queue.qsize() < 500, "label": "Queue", "detail": f"{self.engine.queue.qsize()} 待处理"},
             "storage": {"ok": storage["percent"] < 80, "label": "Storage", "detail": f"{storage['used_bytes'] // 1024 // 1024} MB / {storage['quota_bytes'] // 1024 // 1024} MB"},
             "ffmpeg": {"ok": ffmpeg_ok, "label": "FFmpeg", "detail": await self.ffmpeg.version() if ffmpeg_ok else "未安装"},
         }
+        for platform, adapter in adapters.items():
+            components[f"adapter_{platform}"] = {
+                "ok": bool(adapter and adapter.connected),
+                "label": f"{platform_label(platform)} Adapter",
+                "detail": (adapter.last_error if adapter and not adapter.connected else "") or ("" if adapter else "未配置"),
+            }
         return {
             "version": __version__,
             "uptime": time.time() - self.started_at if self.started_at else 0,
             "components": components,
             "queue": self.engine.queue_status(),
             "storage": storage,
-            "adapters": {"qq": qq.status() if qq else None, "telegram": tg.status() if tg else None},
+            "adapters": {platform: adapter.status() for platform, adapter in adapters.items()},
             "system": {"python": py_platform.python_version(), "os": py_platform.platform(), "cpus": os.cpu_count()},
         }
 
@@ -517,10 +470,12 @@ class BridgeApp:
         def add(name: str, ok: bool, detail: str = "", warn: bool = False) -> None:
             checks.append({"name": name, "status": "PASS" if ok else ("WARN" if warn else "FAIL"), "detail": detail})
 
-        qq = self.engine.adapter(PLATFORM_QQ)
-        tg = self.engine.adapter(PLATFORM_TG)
-        add("QQ Connection", bool(qq and qq.connected), (qq.last_error if qq else "未配置") if not (qq and qq.connected) else f"[{getattr(qq, 'kind_label', 'QQ')}] {qq.self_name} ({qq.self_id})")
-        add("TG Connection", bool(tg and tg.connected), (tg.last_error if tg else "未配置") if not (tg and tg.connected) else f"@{tg.self_name}")
+        conns = await self.db.fetchall("SELECT platform FROM connections WHERE enabled=1")
+        for c in conns:
+            a = self.engine.adapter(c["platform"])
+            ok = bool(a and a.connected)
+            add(f"{platform_label(c['platform'])} Connection", ok,
+                (a.last_error if a else "未配置") if not ok else (f"@{a.self_name}" if a.self_name else "connected"))
         add("Database", await self.db.ping(), str(self.cfg.db_path))
         try:
             probe = self.cfg.tmp_dir / ".probe"
@@ -546,13 +501,13 @@ class BridgeApp:
             if not b["enabled"]:
                 continue
             v = await self.verify_bridge(b)
-            add(f"Bridge #{b['id']} {b['name']}", v["ok"], "; ".join(f"{k}: {v[k].get('reason') or 'ok'}" for k in ("qq", "tg")))
+            add(f"Bridge #{b['id']} {b['name']}", v["ok"], "; ".join(f"{side}: {v[side].get('reason') or 'ok'}" for side in ("a", "b")))
         return checks
 
     async def stats_overview(self) -> dict[str, Any]:
         today = time.strftime("%Y-%m-%d")
         rows = await self.db.fetchall("SELECT direction, kind, SUM(sent) AS sent, SUM(failed) AS failed FROM stats_daily WHERE day=? GROUP BY direction, kind", (today,))
-        out = {"today": {"sent": 0, "failed": 0, "qq_to_tg": 0, "tg_to_qq": 0, "kinds": {}}}
+        out = {"today": {"sent": 0, "failed": 0, "a_to_b": 0, "b_to_a": 0, "kinds": {}}}
         for r in rows:
             out["today"]["sent"] += r["sent"] or 0
             out["today"]["failed"] += r["failed"] or 0
@@ -613,6 +568,11 @@ class BridgeApp:
         id_map: dict[int, int] = {}
         now = time.time()
         for c in data.get("chats") or []:
+            # Only platforms with a built-in adapter can be restored; chats of
+            # removed platforms (e.g. legacy QQ backups) are skipped together
+            # with any bridge that references them.
+            if c.get("platform") not in ADAPTER_PLATFORMS:
+                continue
             row = await self.db.fetchone("SELECT id FROM chats WHERE platform=? AND chat_id=?", (c["platform"], str(c["chat_id"])))
             if row:
                 id_map[c["id"]] = row["id"]
@@ -625,16 +585,20 @@ class BridgeApp:
                 id_map[c["id"]] = new_id
             counts["chats"] += 1
         for b in data.get("bridges") or []:
-            qq_id, tg_id = id_map.get(b["qq_chat_id"]), id_map.get(b["tg_chat_id"])
-            if not qq_id or not tg_id:
+            a_id = id_map.get(b.get("a_chat_id") or b.get("qq_chat_id") or 0)
+            b_id = id_map.get(b.get("b_chat_id") or b.get("tg_chat_id") or 0)
+            if not a_id or not b_id or a_id == b_id:
                 continue
-            dup = await self.db.fetchone("SELECT id FROM bridges WHERE qq_chat_id=? AND tg_chat_id=?", (qq_id, tg_id))
+            direction = {"qq_to_tg": "a_to_b", "tg_to_qq": "b_to_a"}.get(b.get("direction"), b.get("direction") or "both")
+            if direction not in ("both", "a_to_b", "b_to_a"):
+                direction = "both"
+            dup = await self.db.fetchone("SELECT id FROM bridges WHERE a_chat_id=? AND b_chat_id=?", (a_id, b_id))
             if dup:
-                await self.db.update("bridges", {"name": b["name"], "enabled": b.get("enabled", 0), "direction": b.get("direction", "both"),
+                await self.db.update("bridges", {"name": b["name"], "enabled": b.get("enabled", 0), "direction": direction,
                                                  "options": b.get("options", "{}"), "updated_at": now}, "id=?", (dup["id"],))
             else:
-                await self.db.insert("bridges", {"name": b["name"], "enabled": b.get("enabled", 0), "direction": b.get("direction", "both"),
-                                                 "qq_chat_id": qq_id, "tg_chat_id": tg_id, "options": b.get("options", "{}"),
+                await self.db.insert("bridges", {"name": b["name"], "enabled": b.get("enabled", 0), "direction": direction,
+                                                 "a_chat_id": a_id, "b_chat_id": b_id, "options": b.get("options", "{}"),
                                                  "created_at": now, "updated_at": now})
             counts["bridges"] += 1
         for u in data.get("users") or []:
@@ -644,7 +608,7 @@ class BridgeApp:
             await self.db.insert("users", {"username": u["username"], "password_hash": u["password_hash"], "role": u.get("role", "viewer"), "created_at": now})
             counts["users"] += 1
         for c in data.get("connections") or []:
-            if not c.get("config_enc"):
+            if not c.get("config_enc") or c.get("platform") not in ADAPTER_PLATFORMS:
                 continue
             try:
                 self._require_secrets().decrypt(c["config_enc"])

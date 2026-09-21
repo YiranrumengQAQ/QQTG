@@ -23,7 +23,7 @@ from ..db import Database
 from ..logsys import get_logger
 from ..media.processor import MediaProcessor, Prepared
 from ..media.storage import TempStorage
-from ..models import PLATFORM_LABEL, PLATFORM_QQ, PLATFORM_TG, SendResult, UnifiedMessage
+from ..models import PLATFORM_TG, SendResult, UnifiedMessage, platform_label
 from ..settings import Settings
 from .formatter import render, render_edit
 
@@ -115,23 +115,25 @@ class BridgeEngine:
         return self.adapters.get(platform)
 
     # -------------------------------------------------------------- routing
+    BRIDGE_SELECT = (
+        """SELECT b.*, ca.chat_id AS a_chat, ca.platform AS a_platform, ca.title AS a_title, ca.status AS a_status,
+                  cb.chat_id AS b_chat, cb.platform AS b_platform, cb.title AS b_title, cb.status AS b_status
+           FROM bridges b JOIN chats ca ON ca.id=b.a_chat_id JOIN chats cb ON cb.id=b.b_chat_id"""
+    )
+
     async def reload_routes(self) -> None:
-        rows = await self.db.fetchall(
-            """SELECT b.*, q.chat_id AS qq_chat, q.title AS qq_title, q.status AS qq_status,
-                      t.chat_id AS tg_chat, t.title AS tg_title, t.status AS tg_status
-               FROM bridges b JOIN chats q ON q.id=b.qq_chat_id JOIN chats t ON t.id=b.tg_chat_id"""
-        )
+        rows = await self.db.fetchall(self.BRIDGE_SELECT)
         routes: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for r in rows:
             r["options_parsed"] = merge_options(json.loads(r.get("options") or "{}"))
             if not r["enabled"]:
                 continue
-            if r["qq_status"] in ("rejected", "disabled", "left") or r["tg_status"] in ("rejected", "disabled", "left"):
+            if r["a_status"] in ("rejected", "disabled", "left") or r["b_status"] in ("rejected", "disabled", "left"):
                 continue
-            if r["direction"] in ("both", "qq_to_tg"):
-                routes.setdefault((PLATFORM_QQ, str(r["qq_chat"])), []).append(r)
-            if r["direction"] in ("both", "tg_to_qq"):
-                routes.setdefault((PLATFORM_TG, str(r["tg_chat"])), []).append(r)
+            if r["direction"] in ("both", "a_to_b"):
+                routes.setdefault((r["a_platform"], str(r["a_chat"])), []).append(r)
+            if r["direction"] in ("both", "b_to_a"):
+                routes.setdefault((r["b_platform"], str(r["b_chat"])), []).append(r)
         self._routes = routes
         chat_rows = await self.db.fetchall("SELECT id, status FROM chats")
         self._chat_status = {c["id"]: c["status"] for c in chat_rows}
@@ -139,12 +141,24 @@ class BridgeEngine:
     def routes_for(self, platform: str, chat_id: str) -> list[dict[str, Any]]:
         return self._routes.get((platform, str(chat_id)), [])
 
+    @staticmethod
+    def target_side(bridge: dict[str, Any], source_platform: str, source_chat: str) -> Optional[tuple[str, str, str]]:
+        """Resolve (direction, target_platform, target_chat) for a message
+        coming from ``source_platform/source_chat`` in ``bridge``."""
+        if bridge.get("a_platform") == source_platform and str(bridge.get("a_chat")) == str(source_chat):
+            return "a_to_b", str(bridge.get("b_platform")), str(bridge.get("b_chat"))
+        return "b_to_a", str(bridge.get("a_platform")), str(bridge.get("a_chat"))
+
     def is_bridged(self, platform: str, chat_id: str) -> bool:
         """True when the chat takes part in any active bridge (either direction)."""
         if (platform, str(chat_id)) in self._routes:
             return True
-        col = "qq_chat" if platform == PLATFORM_QQ else "tg_chat"
-        return any(str(r[col]) == str(chat_id) for routes in self._routes.values() for r in routes)
+        for routes in self._routes.values():
+            for r in routes:
+                if (r["a_platform"] == platform and str(r["a_chat"]) == str(chat_id)) or \
+                   (r["b_platform"] == platform and str(r["b_chat"]) == str(chat_id)):
+                    return True
+        return False
 
     # ------------------------------------------------------------- incoming
     async def handle_incoming(self, msg: UnifiedMessage) -> None:
@@ -176,7 +190,8 @@ class BridgeEngine:
             log.debug("忽略自身桥接消息 %s/%s", msg.platform, msg.message_id)
             return
 
-        if msg.platform == PLATFORM_QQ and adapter is not None:
+        # Adapters may expose optional enrichment hooks (reply / forward fetch).
+        if adapter is not None:
             enrich = getattr(adapter, "enrich_reply", None)
             if enrich and msg.reply:
                 try:
@@ -194,9 +209,7 @@ class BridgeEngine:
             await self._enqueue(msg, bridge)
 
     async def _enqueue(self, msg: UnifiedMessage, bridge: dict[str, Any]) -> None:
-        target_platform = PLATFORM_TG if msg.platform == PLATFORM_QQ else PLATFORM_QQ
-        target_chat = str(bridge["tg_chat"] if target_platform == PLATFORM_TG else bridge["qq_chat"])
-        direction = "qq_to_tg" if msg.platform == PLATFORM_QQ else "tg_to_qq"
+        direction, target_platform, target_chat = self.target_side(bridge, msg.platform, msg.chat_id)
         opts = bridge["options_parsed"]
 
         # filters
@@ -233,7 +246,7 @@ class BridgeEngine:
         job_msg = msg if not filtered_out else _with_media(msg, allowed_media)
         job = Job(priority=job_msg.priority, seq=next(self._seq), row_id=row_id, message=job_msg, bridge=bridge,
                   target_platform=target_platform, target_chat_id=target_chat)
-        job.step("received", detail=f"{PLATFORM_LABEL.get(msg.platform)} {msg.chat_id}/{msg.message_id}")
+        job.step("received", detail=f"{platform_label(msg.platform)} {msg.chat_id}/{msg.message_id}")
         job.step("route", detail=f"bridge #{bridge['id']} {bridge['name']}")
         if filtered_out:
             job.step("filter", detail=f"过滤 {filtered_out} 个媒体")
@@ -263,7 +276,7 @@ class BridgeEngine:
         await self.db.update("messages", {"status": "processing", "attempts": job.attempts, "updated_at": time.time()}, "id=?", (job.row_id,))
 
         if target is None or not target.connected:
-            await self._finish(job, SendResult(ok=False, error_code="TARGET_OFFLINE", error=f"{PLATFORM_LABEL.get(job.target_platform)} 未连接"))
+            await self._finish(job, SendResult(ok=False, error_code="TARGET_OFFLINE", error=f"{platform_label(job.target_platform)} 未连接"))
             return
 
         mode = opts.get("display_mode") or self.settings.get("display_mode", "standard")
@@ -284,8 +297,6 @@ class BridgeEngine:
         if msg.media and source is not None:
             job_dir = self.storage.new_job_dir()
             for media in msg.media:
-                if msg.platform == PLATFORM_QQ and media.kind.value == "document":
-                    media.extra.setdefault("group_id", msg.chat_id)
                 t0 = time.time()
                 p = await self.processor.prepare(media, job.target_platform, source.download, job_dir)
                 prepared.append(p)
@@ -329,8 +340,8 @@ class BridgeEngine:
                                               "duration_ms": duration_ms, "updated_at": now, "error": None, "error_code": None},
                                  "id=?", (job.row_id,))
             await self._bump_stats(job, ok=True)
-            log.info("#%d %s %s→%s 成功 (%.2fs) %s", job.row_id, job.bridge["name"], PLATFORM_LABEL.get(msg.platform),
-                     PLATFORM_LABEL.get(job.target_platform), duration_ms / 1000, msg.summary(40))
+            log.info("#%d %s %s→%s 成功 (%.2fs) %s", job.row_id, job.bridge["name"], platform_label(msg.platform),
+                     platform_label(job.target_platform), duration_ms / 1000, msg.summary(40))
             return
 
         delays = list(self.settings.get("retry_delays_sec", [1, 5, 30]))
@@ -374,8 +385,7 @@ class BridgeEngine:
         msg = UnifiedMessage(platform=row["source_platform"], chat_id=row["source_chat_id"], message_id=row["source_message_id"],
                              sender=Sender(id=row["source_user_id"] or "", name=row["source_user_name"] or "", platform=row["source_platform"]),
                              text=row["summary"], timestamp=row["created_at"])
-        target_platform = PLATFORM_TG if msg.platform == PLATFORM_QQ else PLATFORM_QQ
-        target_chat = str(bridge["tg_chat"] if target_platform == PLATFORM_TG else bridge["qq_chat"])
+        direction, target_platform, target_chat = self.target_side(bridge, msg.platform, msg.chat_id)
         job = Job(priority=0, seq=next(self._seq), row_id=row_id, message=msg, bridge=bridge, target_platform=target_platform,
                   target_chat_id=target_chat, attempts=0)
         job.step("manual_retry")
@@ -390,10 +400,7 @@ class BridgeEngine:
             for r in routes:
                 if r["id"] == bridge_id:
                     return r
-        row = await self.db.fetchone(
-            """SELECT b.*, q.chat_id AS qq_chat, q.title AS qq_title, q.status AS qq_status,
-                      t.chat_id AS tg_chat, t.title AS tg_title, t.status AS tg_status
-               FROM bridges b JOIN chats q ON q.id=b.qq_chat_id JOIN chats t ON t.id=b.tg_chat_id WHERE b.id=?""", (bridge_id,))
+        row = await self.db.fetchone(self.BRIDGE_SELECT + " WHERE b.id=?", (bridge_id,))
         if row:
             row["options_parsed"] = merge_options(json.loads(row.get("options") or "{}"))
         return row
@@ -418,7 +425,7 @@ class BridgeEngine:
 
     async def _bump_stats(self, job: Job, ok: bool) -> None:
         day = datetime.now().strftime("%Y-%m-%d")
-        direction = "qq_to_tg" if job.message.platform == PLATFORM_QQ else "tg_to_qq"
+        direction = self.target_side(job.bridge, job.message.platform, job.message.chat_id)[0]
         col = "sent" if ok else "failed"
         await self.db.execute(
             f"INSERT INTO stats_daily(day, bridge_id, direction, kind, {col}) VALUES (?,?,?,?,1) "
@@ -450,17 +457,18 @@ class BridgeEngine:
         platform = data.get("platform", "")
         if name == "chat_seen":
             await self.upsert_chat(platform, data["chat"])
-        elif name == "qq_connected":
-            adapter = self.adapters.get(PLATFORM_QQ)
+        elif name == "chats_sync":
+            # Emitted by an adapter on (re)connect to refresh its group list.
+            adapter = self.adapters.get(platform)
             if adapter:
                 infos = await adapter.list_chats()
                 for info in infos:
-                    await self.upsert_chat(PLATFORM_QQ, info, force=True)
+                    await self.upsert_chat(platform, info, force=True)
                 if getattr(adapter, "authoritative_group_list", True):
-                    await self._restore_left_chats(PLATFORM_QQ, {c.chat_id for c in infos})
+                    await self._restore_left_chats(platform, {c.chat_id for c in infos})
         elif name == "bot_left":
             await self._mark_chat_status(platform, data["chat_id"], "left", data.get("reason", ""))
-            slog.warning("%s 机器人离开群 %s", PLATFORM_LABEL.get(platform), data["chat_id"])
+            slog.warning("%s 机器人离开群 %s", platform_label(platform), data["chat_id"])
         elif name == "bot_limited":
             await self._mark_chat_status(platform, data["chat_id"], "limited", data.get("reason", ""))
         elif name == "bot_joined":
@@ -472,7 +480,7 @@ class BridgeEngine:
                 await self.db.update("chats", {"status": "authorized" if await self._has_bridge(platform, data["chat_id"]) else "discovered",
                                                "status_reason": "", "updated_at": time.time()}, "platform=? AND chat_id=?", (platform, str(data["chat_id"])))
                 await self.reload_routes()
-            slog.info("%s 机器人加入群 %s（默认不转发，请在面板中配置桥接）", PLATFORM_LABEL.get(platform), data["chat_id"])
+            slog.info("%s 机器人加入群 %s（默认不转发，请在面板中配置桥接）", platform_label(platform), data["chat_id"])
         elif name == "recall":
             await self._handle_recall(platform, data)
         elif name == "edit":
@@ -485,10 +493,11 @@ class BridgeEngine:
                     await self._enqueue(msg, bridge)
 
     async def _has_bridge(self, platform: str, chat_id: str) -> bool:
-        col = "q" if platform == PLATFORM_QQ else "t"
         row = await self.db.fetchone(
-            f"SELECT 1 FROM bridges b JOIN chats {col} ON {col}.id=b.{'qq' if platform == PLATFORM_QQ else 'tg'}_chat_id "
-            f"WHERE {col}.platform=? AND {col}.chat_id=? LIMIT 1", (platform, str(chat_id)))
+            """SELECT 1 FROM bridges b
+               JOIN chats ca ON ca.id=b.a_chat_id JOIN chats cb ON cb.id=b.b_chat_id
+               WHERE (ca.platform=? AND ca.chat_id=?) OR (cb.platform=? AND cb.chat_id=?) LIMIT 1""",
+            (platform, str(chat_id), platform, str(chat_id)))
         return bool(row)
 
     async def _restore_left_chats(self, platform: str, present: set[str]) -> None:
@@ -524,7 +533,7 @@ class BridgeEngine:
             await self.db.insert("chats", {"platform": platform, "chat_id": info.chat_id, "title": info.title or info.chat_id,
                                            "chat_type": info.chat_type, "member_count": info.member_count, "status": "discovered",
                                            "last_seen_at": now, "created_at": now, "updated_at": now})
-            slog.info("发现新群: %s · %s (%s)", PLATFORM_LABEL.get(platform), info.title, info.chat_id)
+            slog.info("发现新群: %s · %s (%s)", platform_label(platform), info.title, info.chat_id)
 
     async def _handle_recall(self, platform: str, data: dict[str, Any]) -> None:
         chat_id, mid = str(data["chat_id"]), str(data["message_id"])
@@ -537,15 +546,14 @@ class BridgeEngine:
                 continue
             target = self.adapters.get(r["target_platform"])
             if target and await target.delete_message(r["target_chat_id"], r["target_message_id"]):
-                log.info("撤回同步: %s %s → %s %s", PLATFORM_LABEL.get(platform), mid, PLATFORM_LABEL.get(r["target_platform"]), r["target_message_id"])
+                log.info("撤回同步: %s %s → %s %s", platform_label(platform), mid, platform_label(r["target_platform"]), r["target_message_id"])
 
     async def _handle_edit(self, msg: UnifiedMessage) -> None:
         for bridge in self.routes_for(msg.platform, msg.chat_id):
             opts = bridge["options_parsed"]
             if not opts.get("edit_sync"):
                 continue
-            target_platform = PLATFORM_TG if msg.platform == PLATFORM_QQ else PLATFORM_QQ
-            target_chat = str(bridge["tg_chat"] if target_platform == PLATFORM_TG else bridge["qq_chat"])
+            _direction, target_platform, target_chat = self.target_side(bridge, msg.platform, msg.chat_id)
             target = self.adapters.get(target_platform)
             if not target:
                 continue
@@ -564,7 +572,7 @@ class BridgeEngine:
         if not adapter:
             return
         row = await self.db.fetchone("SELECT * FROM chats WHERE platform=? AND chat_id=?", (msg.platform, msg.chat_id))
-        label = PLATFORM_LABEL.get(msg.platform, msg.platform)
+        label = platform_label(msg.platform)
         title = msg.chat_title or (row["title"] if row else msg.chat_id)
         bridged = self.is_bridged(msg.platform, msg.chat_id)
         if bridged:
@@ -586,22 +594,22 @@ class BridgeEngine:
 
     # ----------------------------------------------------------------- tests
     async def send_test(self, bridge: dict[str, Any]) -> dict[str, Any]:
+        """Send a probe into each side the direction allows; keyed by data flow."""
         results: dict[str, Any] = {}
         stamp = datetime.now().strftime("%H:%M:%S")
-        if bridge["direction"] in ("both", "qq_to_tg"):
-            tg = self.adapters.get(PLATFORM_TG)
-            if tg and tg.connected:
-                r = await tg.send(OutgoingMessage(chat_id=str(bridge["tg_chat"]), text=f"✅ QQTG Bridge 测试消息 (QQ → TG) {stamp}\n桥接：{bridge['name']}"))
-                results["qq_to_tg"] = {"ok": r.ok, "error": r.error}
+        for direction, from_side, to_side in (("a_to_b", "a", "b"), ("b_to_a", "b", "a")):
+            if bridge["direction"] not in ("both", direction):
+                continue
+            adapter = self.adapters.get(str(bridge[f"{to_side}_platform"]))
+            if adapter and adapter.connected:
+                from_chat = bridge.get(f"{from_side}_title") or bridge.get(f"{from_side}_chat")
+                to_chat = bridge.get(f"{to_side}_title") or bridge.get(f"{to_side}_chat")
+                r = await adapter.send(OutgoingMessage(
+                    chat_id=str(bridge[f"{to_side}_chat"]),
+                    text=f"✅ Rain Bridge 测试消息 {stamp}\n桥接：{bridge['name']}\n方向：{from_chat} → {to_chat}"))
+                results[direction] = {"ok": r.ok, "error": r.error}
             else:
-                results["qq_to_tg"] = {"ok": False, "error": "Telegram 未连接"}
-        if bridge["direction"] in ("both", "tg_to_qq"):
-            qq = self.adapters.get(PLATFORM_QQ)
-            if qq and qq.connected:
-                r = await qq.send(OutgoingMessage(chat_id=str(bridge["qq_chat"]), text=f"✅ QQTG Bridge 测试消息 (TG → QQ) {stamp}\n桥接：{bridge['name']}"))
-                results["tg_to_qq"] = {"ok": r.ok, "error": r.error}
-            else:
-                results["tg_to_qq"] = {"ok": False, "error": "QQ 未连接"}
+                results[direction] = {"ok": False, "error": f"{platform_label(str(bridge[f'{to_side}_platform']))} 未连接"}
         return results
 
     def queue_status(self) -> dict[str, Any]:

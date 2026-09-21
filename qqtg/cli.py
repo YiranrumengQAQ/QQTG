@@ -20,7 +20,7 @@ from .security import hash_password, mask_secret
 
 def _print_banner() -> None:
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print(f" QQ ↔ Telegram Bridge  v{__version__}")
+    print(f" Rain Bridge · 群组桥接  v{__version__}")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 
@@ -152,18 +152,18 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
         conns = await db.fetchall("SELECT platform, name, self_id, self_name, enabled FROM connections")
         print("\n连接:")
         if not conns:
-            print("  (尚未配置，请在面板中连接 QQ 与 Telegram)")
+            print("  (尚未配置，请在面板中连接 Telegram)")
         for c in conns:
             print(f"  {c['platform']:<9} {c['self_name'] or c['name'] or ''} {('(' + str(c['self_id']) + ')') if c['self_id'] else ''}")
         bridges = await db.fetchall(
-            "SELECT b.id, b.name, b.enabled, b.direction, q.title AS qq, t.title AS tg FROM bridges b "
-            "JOIN chats q ON q.id=b.qq_chat_id JOIN chats t ON t.id=b.tg_chat_id ORDER BY b.id")
+            "SELECT b.id, b.name, b.enabled, b.direction, ca.title AS a_title, cb.title AS b_title FROM bridges b "
+            "JOIN chats ca ON ca.id=b.a_chat_id JOIN chats cb ON cb.id=b.b_chat_id ORDER BY b.id")
         print("\n桥接:")
         if not bridges:
             print("  (无)")
-        arrows = {"both": "↔", "qq_to_tg": "→", "tg_to_qq": "←"}
+        arrows = {"both": "↔", "a_to_b": "→", "b_to_a": "←"}
         for b in bridges:
-            print(f"  #{b['id']:<3} {'●' if b['enabled'] else '○'} {b['name']}: {b['qq']} {arrows.get(b['direction'], '?')} {b['tg']}")
+            print(f"  #{b['id']:<3} {'●' if b['enabled'] else '○'} {b['name']}: {b['a_title']} {arrows.get(b['direction'], '?')} {b['b_title']}")
         today = time.strftime("%Y-%m-%d")
         st = await db.fetchone("SELECT COALESCE(SUM(sent),0) AS sent, COALESCE(SUM(failed),0) AS failed FROM stats_daily WHERE day=?", (today,))
         print(f"\n今日消息: {st['sent'] if st else 0} 成功 / {st['failed'] if st else 0} 失败")
@@ -275,7 +275,7 @@ def cmd_config(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="qqtg", description="QQ ↔ Telegram Bridge")
+    parser = argparse.ArgumentParser(prog="qqtg", description="Rain Bridge · 群组桥接")
     parser.add_argument("--home", help="安装目录 (默认 $QQTG_HOME 或 /opt/qqtg-bridge)")
     parser.add_argument("--version", action="version", version=f"qqtg-bridge {__version__}")
     sub = parser.add_subparsers(dest="command")

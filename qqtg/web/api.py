@@ -7,9 +7,9 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from ..core.app import BridgeApp
+from ..core.app import ADAPTER_PLATFORMS, BridgeApp
 from ..logsys import get_logger
-from ..models import PLATFORM_QQ, PLATFORM_TG, BridgeError
+from ..models import PLATFORM_TG, BridgeError
 from ..security import hash_password, verify_password
 from ..settings import SETTING_SCHEMA
 from .auth import authenticate, check_csrf, client_ip, create_session, current_session, destroy_session, require_role
@@ -133,7 +133,7 @@ def build_router(app: BridgeApp) -> APIRouter:
     # ----------------------------------------------------- connections
     @router.get("/connections")
     async def connections(sess: dict[str, Any] = Depends(session_dep)) -> dict[str, Any]:
-        return {"qq": await app.public_connection(PLATFORM_QQ), "telegram": await app.public_connection(PLATFORM_TG)}
+        return {"telegram": await app.public_connection(PLATFORM_TG)}
 
     @router.post("/connections/telegram/test")
     async def tg_test(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
@@ -167,73 +167,16 @@ def build_router(app: BridgeApp) -> APIRouter:
         log.info("Telegram Bot 已配置: @%s", test.get("username"))
         return {"ok": True, "bot": test}
 
-    @router.put("/connections/qq")
-    async def qq_save(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
-        data = await body(request)
-        kind = str(data.get("kind") or "").strip() or ("official" if data.get("app_id") else "onebot")
-        existing = await app.get_connection(PLATFORM_QQ)
-        try:
-            if kind == "official":
-                app_id = str(data.get("app_id", "")).strip()
-                app_secret = str(data.get("app_secret", "")).strip()
-                api_base = str(data.get("api_base", "")).strip()
-                if not app_id:
-                    raise HTTPException(400, "请填写 AppID")
-                if not app_secret and existing and existing.get("config", {}).get("kind") == "official":
-                    app_secret = existing["config"].get("app_secret", "")
-                if not app_secret:
-                    raise HTTPException(400, "请填写 AppSecret（或使用扫码授权获取）")
-                if len(app_id) > 64 or len(app_secret) > 256:
-                    raise HTTPException(400, "AppID / AppSecret 格式不正确")
-                bot = await app.save_qqbot_official(app_id, app_secret, api_base)
-                log.info("QQ 官方机器人已配置: AppID=%s bot=%s", app_id, bot.get("username"))
-                return {"ok": True, "kind": "official", "bot": bot}
-            mode = str(data.get("mode", "forward"))
-            ws_url = str(data.get("ws_url", "")).strip()
-            access_token = str(data.get("access_token", "")).strip()
-            if not access_token and existing and data.get("keep_token", True) and existing.get("config", {}).get("kind") != "official":
-                access_token = existing["config"].get("access_token", "")
-            if mode == "forward" and not (ws_url.startswith("ws://") or ws_url.startswith("wss://")):
-                raise HTTPException(400, "正向 WebSocket 地址需以 ws:// 或 wss:// 开头")
-            await app.save_connection(PLATFORM_QQ, {"kind": "onebot", "mode": mode, "ws_url": ws_url, "access_token": access_token}, name="OneBot v11")
-            await app.start_adapter(PLATFORM_QQ)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise wrap_error(exc)
-        log.info("QQ (OneBot) 连接已配置: mode=%s", mode)
-        return {"ok": True, "kind": "onebot"}
-
-    # --------------------------------------------- QQ 官方机器人扫码授权
-    @router.post("/connections/qq/qr/start")
-    async def qq_qr_start(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
-        try:
-            await app.qq_qr.start()
-        except Exception as exc:
-            raise wrap_error(exc)
-        log.info("QQ 官方机器人扫码授权会话已创建 (%s)", client_ip(request))
-        return {"ok": True, **app.qq_qr.payload()}
-
-    @router.get("/connections/qq/qr")
-    async def qq_qr_status(sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
-        return {"ok": True, **app.qq_qr.payload()}
-
-    @router.delete("/connections/qq/qr")
-    async def qq_qr_cancel(sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
-        await app.qq_qr.cancel()
-        return {"ok": True}
-
-
     @router.post("/connections/{platform}/restart")
     async def conn_restart(platform: str, sess: dict[str, Any] = Depends(admin_dep)) -> dict[str, Any]:
-        if platform not in (PLATFORM_QQ, PLATFORM_TG):
+        if platform not in ADAPTER_PLATFORMS:
             raise HTTPException(404)
         await app.start_adapter(platform)
         return {"ok": True, "status": await app.public_connection(platform)}
 
     @router.delete("/connections/{platform}")
     async def conn_delete(platform: str, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
-        if platform not in (PLATFORM_QQ, PLATFORM_TG):
+        if platform not in ADAPTER_PLATFORMS:
             raise HTTPException(404)
         await app.delete_connection(platform)
         return {"ok": True}
@@ -251,7 +194,7 @@ def build_router(app: BridgeApp) -> APIRouter:
     async def chats_manual(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
         data = await body(request)
         platform = str(data.get("platform", ""))
-        if platform not in (PLATFORM_QQ, PLATFORM_TG):
+        if platform not in ADAPTER_PLATFORMS:
             raise HTTPException(400, "无效平台")
         try:
             row = await app.add_chat_manual(platform, str(data.get("chat_id", "")), str(data.get("title", "")))
@@ -292,7 +235,7 @@ def build_router(app: BridgeApp) -> APIRouter:
     async def bridge_create(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
         data = await body(request)
         try:
-            bid = await app.create_bridge(str(data.get("name", "")), int(data.get("qq_chat_id", 0)), int(data.get("tg_chat_id", 0)),
+            bid = await app.create_bridge(str(data.get("name", "")), int(data.get("a_chat_id", 0)), int(data.get("b_chat_id", 0)),
                                           str(data.get("direction", "both")), data.get("options") or {}, bool(data.get("enabled", False)))
         except Exception as exc:
             raise wrap_error(exc)
@@ -414,18 +357,10 @@ def build_router(app: BridgeApp) -> APIRouter:
             app.processor.reconfigure()
         app.storage.configure(int(app.settings.get("tmp_quota_mb")), int(app.settings.get("tmp_ttl_min")))
         if app.engine:
-            for platform in (PLATFORM_QQ, PLATFORM_TG):
-                a = app.engine.adapter(platform)
-                if a and hasattr(a, "limiter"):
-                    if platform == PLATFORM_TG:
-                        a.limiter.reconfigure(float(app.settings.get("tg_rate_global_per_sec")), float(app.settings.get("tg_rate_per_chat_per_min")) / 60.0, 5)
-                        a.bridge_other_bots = bool(app.settings.get("bridge_other_bots"))
-                    elif getattr(a, "kind", "onebot") == "official":
-                        a.limiter.reconfigure(1.0, float(app.settings.get("qqbot_rate_per_chat_per_sec")), 2)
-                        if hasattr(a, "public_base"):
-                            a.public_base = app.effective_public_base()
-                    else:
-                        a.limiter.reconfigure(10, float(app.settings.get("qq_rate_per_chat_per_sec")), 3)
+            a = app.engine.adapter(PLATFORM_TG)
+            if a and hasattr(a, "limiter"):
+                a.limiter.reconfigure(float(app.settings.get("tg_rate_global_per_sec")), float(app.settings.get("tg_rate_per_chat_per_min")) / 60.0, 5)
+                a.bridge_other_bots = bool(app.settings.get("bridge_other_bots"))
         log.info("设置已更新: %s", ", ".join(changed))
         return {"ok": True, "settings": app.settings.public()}
 

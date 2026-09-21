@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qqtg-bridge"
 version = "1.1.0"
-description = "QQ <-> Telegram group bridge: multi-group routing, media conversion, loop protection, web panel."
+description = "Rain Bridge: multi-group message bridging (Telegram built-in, platforms pluggable), media conversion, loop protection, web panel."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

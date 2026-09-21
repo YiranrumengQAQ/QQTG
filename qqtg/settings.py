@@ -48,19 +48,12 @@ DEFAULTS: dict[str, Any] = {
     # size policy (MB)
     "tg_upload_limit_mb": 50,  # Bot API hard limit for standard servers
     "tg_download_limit_mb": 20,  # Bot API hard limit for standard servers
-    "qq_media_limit_mb": 100,
-    "direct_send_limit_mb": 10,  # <= : send directly, between: try, above qq/tg limit: fallback text
+    "direct_send_limit_mb": 10,  # <= : send directly; above the platform limit: fallback text
     # rate limiting
     "tg_rate_per_chat_per_min": 20,
     "tg_rate_global_per_sec": 25,
-    "qq_rate_per_chat_per_sec": 1.5,
-    "qqbot_rate_per_chat_per_sec": 0.33,
-    # official QQ bot media upload needs a publicly reachable base URL
-    "public_media_base": "",
     # retries
     "retry_delays_sec": [1, 5, 30],
-    # audio
-    "qq_voice_format": "wav",  # wav is accepted by every OneBot implementation
     # behaviour
     "bridge_other_bots": False,  # TG messages from other bots
     "event_sync_default": False,
@@ -70,7 +63,7 @@ DEFAULTS: dict[str, Any] = {
     "message_retention_days": 30,
     "media_cache_days": 30,
     # panel
-    "panel_title": "QQ ↔ Telegram Bridge",
+    "panel_title": "雨幕桥接 · Rain Bridge",
     "session_hours": 72,
 }
 
@@ -84,14 +77,9 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "tmp_ttl_min": {"type": "int", "min": 1, "max": 1440, "label": "临时文件保留 (分钟)"},
     "tg_upload_limit_mb": {"type": "int", "min": 1, "max": 4000, "label": "Telegram 上传上限 (MB)"},
     "tg_download_limit_mb": {"type": "int", "min": 1, "max": 4000, "label": "Telegram 下载上限 (MB)"},
-    "qq_media_limit_mb": {"type": "int", "min": 1, "max": 4000, "label": "QQ 媒体上限 (MB)"},
     "direct_send_limit_mb": {"type": "int", "min": 1, "max": 4000, "label": "直接发送阈值 (MB)"},
     "tg_rate_per_chat_per_min": {"type": "int", "min": 1, "max": 60, "label": "Telegram 每群每分钟"},
     "tg_rate_global_per_sec": {"type": "int", "min": 1, "max": 30, "label": "Telegram 全局每秒"},
-    "qq_rate_per_chat_per_sec": {"type": "float", "min": 0.1, "max": 20, "label": "QQ 每群每秒（OneBot）"},
-    "qqbot_rate_per_chat_per_sec": {"type": "float", "min": 0.05, "max": 5, "label": "QQ 每群每秒（官方机器人）"},
-    "public_media_base": {"type": "str", "label": "公网媒体地址（QQ 官方机器人用，如 https://bridge.example.com）"},
-    "qq_voice_format": {"type": "choice", "choices": ["wav", "mp3", "ogg"], "label": "发往 QQ 的语音格式"},
     "bridge_other_bots": {"type": "bool", "label": "转发 Telegram 其他机器人的消息"},
     "event_sync_default": {"type": "bool", "label": "新桥默认同步群事件"},
     "telegram_api_base": {"type": "str", "label": "Telegram Bot API 地址"},
