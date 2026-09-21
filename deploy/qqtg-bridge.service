@@ -1,0 +1,36 @@
+[Unit]
+Description=QQTG Bridge (QQ <-> Telegram group bridge)
+Documentation=https://github.com/YiranrumengQAQ/QQTG
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__HOME__
+Environment=QQTG_HOME=__HOME__
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=__HOME__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-__HOME__/config/config.env
+ExecStart=__HOME__/venv/bin/python -m qqtg run
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+LimitNOFILE=65536
+
+# Hardening (the service only needs its own directory)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__HOME__
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
