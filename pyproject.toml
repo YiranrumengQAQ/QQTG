@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qqtg-bridge"
-version = "1.0.0"
+version = "1.1.0"
 description = "QQ <-> Telegram group bridge: multi-group routing, media conversion, loop protection, web panel."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.27",
     "aiosqlite>=0.19",
     "cryptography>=41",
+    "qrcode>=7.4",
 ]
 
 [project.scripts]

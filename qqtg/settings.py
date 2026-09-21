@@ -54,6 +54,9 @@ DEFAULTS: dict[str, Any] = {
     "tg_rate_per_chat_per_min": 20,
     "tg_rate_global_per_sec": 25,
     "qq_rate_per_chat_per_sec": 1.5,
+    "qqbot_rate_per_chat_per_sec": 0.33,
+    # official QQ bot media upload needs a publicly reachable base URL
+    "public_media_base": "",
     # retries
     "retry_delays_sec": [1, 5, 30],
     # audio
@@ -85,7 +88,9 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "direct_send_limit_mb": {"type": "int", "min": 1, "max": 4000, "label": "直接发送阈值 (MB)"},
     "tg_rate_per_chat_per_min": {"type": "int", "min": 1, "max": 60, "label": "Telegram 每群每分钟"},
     "tg_rate_global_per_sec": {"type": "int", "min": 1, "max": 30, "label": "Telegram 全局每秒"},
-    "qq_rate_per_chat_per_sec": {"type": "float", "min": 0.1, "max": 20, "label": "QQ 每群每秒"},
+    "qq_rate_per_chat_per_sec": {"type": "float", "min": 0.1, "max": 20, "label": "QQ 每群每秒（OneBot）"},
+    "qqbot_rate_per_chat_per_sec": {"type": "float", "min": 0.05, "max": 5, "label": "QQ 每群每秒（官方机器人）"},
+    "public_media_base": {"type": "str", "label": "公网媒体地址（QQ 官方机器人用，如 https://bridge.example.com）"},
     "qq_voice_format": {"type": "choice", "choices": ["wav", "mp3", "ogg"], "label": "发往 QQ 的语音格式"},
     "bridge_other_bots": {"type": "bool", "label": "转发 Telegram 其他机器人的消息"},
     "event_sync_default": {"type": "bool", "label": "新桥默认同步群事件"},

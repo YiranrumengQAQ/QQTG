@@ -209,24 +209,63 @@
   }
 
   // ------------------------------------------------------------ connections
-  async function viewConnections() {
+    async function viewConnections() {
     const c = await get("/connections");
     const qq = c.qq, tg = c.telegram;
     const owner = can("owner");
+    if (state.qqTab === undefined || state.qqTab === null) state.qqTab = qq.configured ? (qq.config.kind || "onebot") : "onebot";
+    state.qqAuth = state.qqAuth || "qr";
+    const qqKindLabel = qq.configured ? (qq.config.kind === "official" ? "QQ 官方机器人" : "个人账号 · OneBot v11") : "";
+    const obCfg = qq.config && qq.config.kind !== "official" ? qq.config : null;
+    const ofCfg = qq.config && qq.config.kind === "official" ? qq.config : null;
+    const qqInfo = qq.configured
+      ? (ofCfg
+        ? `<dl class="kv"><dt>类型</dt><dd>QQ 官方机器人（q.qq.com）</dd><dt>机器人</dt><dd>${esc(qq.status.self_name || "-")} ${qq.status.self_id ? "(" + esc(qq.status.self_id) + ")" : ""}</dd><dt>AppID</dt><dd class="mono">${esc(ofCfg.app_id || "-")}</dd><dt>API</dt><dd class="mono">${esc(ofCfg.api_base || "api.bot.qq.com")}</dd><dt>媒体上传</dt><dd>${qq.status.public_media ? '<span class="badge ok">公网地址已配置</span>' : '<span class="badge warn">未配置公网地址，媒体将无法发送</span>'}</dd><dt>已发现群</dt><dd>${qq.status.groups || 0}（官方接口无群列表，群内 @机器人 后自动出现）</dd>${qq.status.last_error ? `<dt>最近错误</dt><dd style="color:var(--bad)">${esc(qq.status.last_error)}</dd>` : ""}</dl>
+            <div class="alert small" style="margin-top:10px">官方机器人限制：群内仅能收到 <b>@机器人</b> 的消息；回复需在收到消息后 5 分钟内（每条最多回复 5 次）；主动消息受平台配额限制。发送图片 / 视频 / 文件需在「系统」页配置公网媒体地址。</div>`
+        : `<dl class="kv"><dt>类型</dt><dd>个人账号（OneBot v11 · NapCat / LLOneBot / Lagrange）</dd><dt>账号</dt><dd>${esc(qq.status.self_name || "-")} ${qq.status.self_id ? "(" + esc(qq.status.self_id) + ")" : ""}</dd><dt>实现</dt><dd>${esc(qq.status.impl || "-")}</dd><dt>模式</dt><dd>${obCfg.mode === "reverse" ? "反向 WebSocket（QQ 客户端连接到本机）" : "正向 WebSocket"}</dd><dt>已加入群</dt><dd>${qq.status.groups || 0}</dd>${qq.status.last_error ? `<dt>最近错误</dt><dd style="color:var(--bad)">${esc(qq.status.last_error)}</dd>` : ""}</dl>`)
+      : `<div class="alert">选择 QQ 接入方式：<br>· <b>个人账号（内置 OneBot）</b> —— 配合 NapCat / LLOneBot / Lagrange 登录个人 QQ 号当作机器人，功能最全，支持全部消息类型；<br>· <b>QQ 官方机器人</b> —— 接入 <a href="https://q.qq.com" target="_blank" rel="noreferrer">QQ 开放平台</a> 创建的正式机器人，支持 <b>扫码授权</b> 或 <b>输入 AppID / AppSecret</b>（平台限制：仅收到 @机器人 消息，回复窗口 5 分钟）。</div>`;
     mount(shell(`
       <div class="page-head"><div><h1>连接</h1><div class="sub">一个 QQ 机器人 + 一个 Telegram 机器人即可服务任意数量的群组</div></div></div>
       <div class="grid cols-2">
         <div class="card">
-          <div class="card-head"><h2>QQ（OneBot v11）</h2>${connBadge(qq)}</div>
-          ${qq.configured ? `<dl class="kv"><dt>账号</dt><dd>${esc(qq.status.self_name || "-")} ${qq.status.self_id ? "(" + esc(qq.status.self_id) + ")" : ""}</dd><dt>实现</dt><dd>${esc(qq.status.impl || "-")}</dd><dt>模式</dt><dd>${qq.config.mode === "reverse" ? "反向 WebSocket（QQ 客户端连接到本机）" : "正向 WebSocket"}</dd><dt>已加入群</dt><dd>${qq.status.groups || 0}</dd>${qq.status.last_error ? `<dt>最近错误</dt><dd style="color:var(--bad)">${esc(qq.status.last_error)}</dd>` : ""}</dl><hr style="border:0;border-top:1px solid var(--border);margin:14px 0">` : `<div class="alert">尚未连接。请先安装 <b>NapCat</b> / LLOneBot / Lagrange 等 OneBot v11 实现并登录 QQ，然后在下面填写它的 WebSocket 地址。</div>`}
-          ${owner ? `<form id="fqq">
-            <div class="field"><label>连接模式</label><select class="input" name="mode"><option value="forward" ${qq.config && qq.config.mode === "reverse" ? "" : "selected"}>正向 WebSocket（Bridge 主动连接 NapCat，推荐）</option><option value="reverse" ${qq.config && qq.config.mode === "reverse" ? "selected" : ""}>反向 WebSocket（NapCat 连接 Bridge）</option></select></div>
-            <div class="field" data-fwd><label>WebSocket 地址</label><input class="input mono" name="ws_url" value="${esc(qq.config ? qq.config.ws_url : "ws://127.0.0.1:3001")}" placeholder="ws://127.0.0.1:3001"><div class="hint">NapCat：网络配置 → 新建「WebSocket 服务器」→ 端口 3001。</div></div>
-            <div class="field" data-rev style="display:none"><label>反向连接地址</label><div class="input mono" style="user-select:all">ws://&lt;本机地址&gt;:${location.port || (location.protocol === "https:" ? 443 : 80)}/onebot/v11/ws</div><div class="hint">在 NapCat 中新建「WebSocket 客户端」并填入此地址（若通过反向代理访问，请使用面板域名）。</div></div>
-            <div class="field"><label>Access Token（可选）</label><input class="input mono" name="access_token" placeholder="${qq.config && qq.config.access_token_masked ? "已保存 " + qq.config.access_token_masked + "，留空保持不变" : "与 NapCat 中配置的 token 一致"}" autocomplete="off"></div>
-            <div class="actions"><button class="btn primary">保存并连接</button>${qq.configured ? `<button class="btn" type="button" data-restart="qq">重新连接</button><button class="btn danger" type="button" data-del="qq">移除</button>` : ""}</div>
-          </form>` : ""}
-          <div class="muted small" style="margin-top:14px">连接成功后，机器人所在的 QQ 群会自动出现在「群组」页面。也可以让群管理员在群里发送 <code>/bridge</code> 申请绑定。</div>
+          <div class="card-head"><h2>QQ</h2><div class="actions">${qqKindLabel ? `<span class="badge info">${qqKindLabel}</span>` : ""}${connBadge(qq)}</div></div>
+          ${qqInfo}
+          ${owner ? `
+          <div class="seg" style="margin-top:14px">
+            <button type="button" class="seg-btn ${state.qqTab === "onebot" ? "active" : ""}" data-qqtab="onebot">个人账号（内置 OneBot）</button>
+            <button type="button" class="seg-btn ${state.qqTab === "official" ? "active" : ""}" data-qqtab="official">QQ 官方机器人</button>
+          </div>
+          <div id="qq-onebot" style="${state.qqTab === "onebot" ? "" : "display:none"}">
+            <form id="fqq" style="margin-top:12px">
+              <div class="field"><label>连接模式</label><select class="input" name="mode"><option value="forward" ${obCfg && obCfg.mode === "reverse" ? "" : "selected"}>正向 WebSocket（Bridge 主动连接 NapCat，推荐）</option><option value="reverse" ${obCfg && obCfg.mode === "reverse" ? "selected" : ""}>反向 WebSocket（NapCat 连接 Bridge）</option></select></div>
+              <div class="field" data-fwd><label>WebSocket 地址</label><input class="input mono" name="ws_url" value="${esc(obCfg ? obCfg.ws_url : "ws://127.0.0.1:3001")}" placeholder="ws://127.0.0.1:3001"><div class="hint">NapCat：网络配置 → 新建「WebSocket 服务器」→ 端口 3001。</div></div>
+              <div class="field" data-rev style="display:none"><label>反向连接地址</label><div class="input mono" style="user-select:all">ws://&lt;本机地址&gt;:${location.port || (location.protocol === "https:" ? 443 : 80)}/onebot/v11/ws</div><div class="hint">在 NapCat 中新建「WebSocket 客户端」并填入此地址（若通过反向代理访问，请使用面板域名）。</div></div>
+              <div class="field"><label>Access Token（可选）</label><input class="input mono" name="access_token" placeholder="${obCfg && obCfg.access_token_masked ? "已保存 " + obCfg.access_token_masked + "，留空保持不变" : "与 NapCat 中配置的 token 一致"}" autocomplete="off"></div>
+              <div class="actions"><button class="btn primary">保存并连接</button></div>
+            </form>
+            <div class="muted small" style="margin-top:10px">连接成功后，机器人所在的 QQ 群会自动出现在「群组」页面。也可以让群管理员在群里发送 <code>/bridge</code> 申请绑定。</div>
+          </div>
+          <div id="qq-official" style="${state.qqTab === "official" ? "" : "display:none"}">
+            <div class="seg" style="margin-top:12px">
+              <button type="button" class="seg-btn sm ${state.qqAuth === "qr" ? "active" : ""}" data-qqauth="qr">扫码授权</button>
+              <button type="button" class="seg-btn sm ${state.qqAuth === "input" ? "active" : ""}" data-qqauth="input">输入授权</button>
+            </div>
+            <div id="qq-qr" style="margin-top:12px;${state.qqAuth === "qr" ? "" : "display:none"}">
+              <div class="muted small">用<b>手机 QQ「扫一扫」</b>扫描二维码，选择要绑定的 QQ 机器人并确认，即可自动获取 AppID / AppSecret 并完成连接（与 QQ 开放平台官方扫码绑定一致）。</div>
+              <div id="qr-area" style="margin-top:10px"></div>
+            </div>
+            <form id="fqqr" style="margin-top:12px;${state.qqAuth === "input" ? "" : "display:none"}">
+              <div class="field"><label>AppID</label><input class="input mono" name="app_id" value="${esc(ofCfg ? ofCfg.app_id : "")}" placeholder="QQ 开放平台 → 机器人管理 → 开发设置" autocomplete="off"></div>
+              <div class="field"><label>AppSecret</label><input class="input mono" name="app_secret" placeholder="${ofCfg && ofCfg.app_secret_masked ? "已保存 " + ofCfg.app_secret_masked + "，留空保持不变" : "AppSecret"}" autocomplete="off"></div>
+              <details ${ofCfg && ofCfg.api_base ? "open" : ""}><summary class="muted small" style="cursor:pointer;margin-bottom:6px">高级选项</summary>
+                <div class="field"><label>API 地址（可选，一般留空）</label><input class="input mono" name="api_base" value="${esc(ofCfg ? ofCfg.api_base : "")}" placeholder="https://api.bot.qq.com"></div>
+              </details>
+              <div class="actions"><button class="btn primary">验证并保存</button></div>
+              <div class="muted small" style="margin-top:8px">AppID / AppSecret 在 <a href="https://q.qq.com" target="_blank" rel="noreferrer">q.qq.com</a> → 开发设置 中获取；也可以用左侧「扫码授权」免输入。</div>
+            </form>
+          </div>
+          ${qq.configured ? `<hr style="border:0;border-top:1px solid var(--border);margin:14px 0"><div class="actions"><button class="btn" type="button" data-restart="qq">重新连接</button><button class="btn danger" type="button" data-del="qq">移除连接</button></div>` : ""}
+          ` : ""}
         </div>
         <div class="card">
           <div class="card-head"><h2>Telegram Bot</h2>${connBadge(tg)}</div>
@@ -245,7 +284,13 @@
       const modeSel = fel(fqq, "mode");
       const syncMode = () => { const rev = modeSel.value === "reverse"; $("[data-fwd]", fqq).style.display = rev ? "none" : ""; $("[data-rev]", fqq).style.display = rev ? "" : "none"; };
       modeSel.onchange = syncMode; syncMode();
-      fqq.onsubmit = async (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(fqq).entries()); try { await put("/connections/qq", fd); toast("QQ 连接已保存，正在连接…", "ok"); setTimeout(viewConnections, 1500); } catch (err) { toast(err.message, "bad"); } };
+      fqq.onsubmit = async (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(fqq).entries()); fd.kind = "onebot"; try { await put("/connections/qq", fd); toast("QQ 已保存，正在连接…", "ok"); setTimeout(viewConnections, 1500); } catch (err) { toast(err.message, "bad"); } };
+    }
+    $$("[data-qqtab]").forEach((b) => b.onclick = () => { const v = b.dataset.qqtab; if (state.qqTab !== v) { state.qqTab = v; render(); } });
+    $$("[data-qqauth]").forEach((b) => b.onclick = () => { const v = b.dataset.qqauth; if (state.qqAuth !== v) { state.qqAuth = v; render(); } });
+    const fqqr = $("#fqqr");
+    if (fqqr) {
+      fqqr.onsubmit = async (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(fqqr).entries()); fd.kind = "official"; const btn = $("button.primary", fqqr); btn.disabled = true; try { const r = await put("/connections/qq", fd); toast(`QQ 官方机器人已连接 @${(r.bot && r.bot.username) || ""}`, "ok"); viewConnections(); } catch (err) { toast(err.message, "bad"); } btn.disabled = false; };
     }
     const ftg = $("#ftg");
     if (ftg) {
@@ -254,7 +299,64 @@
     }
     $$("[data-restart]").forEach((b) => b.onclick = async () => { b.disabled = true; try { await post(`/connections/${b.dataset.restart}/restart`); toast("正在重新连接…", "ok"); setTimeout(viewConnections, 1500); } catch (e) { toast(e.message, "bad"); b.disabled = false; } });
     $$("[data-del]").forEach((b) => b.onclick = async () => { if (await confirmDialog("移除连接", `确定移除 ${PLAT[b.dataset.del]} 连接？相关桥接将停止工作。`, "移除", true)) { try { await del(`/connections/${b.dataset.del}`); viewConnections(); } catch (e) { toast(e.message, "bad"); } } });
-    every(8000, () => { if (location.hash === "#/connections" && !document.activeElement.closest("form")) viewConnections(); });
+    const qrVisible = owner && state.qqTab === "official" && state.qqAuth === "qr";
+    if (qrVisible) {
+      startQrPoll();
+    } else {
+      every(8000, () => { if (location.hash === "#/connections" && !document.activeElement.closest("form") && !(state.qqTab === "official" && state.qqAuth === "qr")) viewConnections(); });
+    }
+  }
+
+  function startQrPoll() {
+    state.qqQr = state.qqQr || { state: "idle", qr_svg: "", refreshes: 0 };
+    applyQr(state.qqQr);
+    const timer = setInterval(async () => {
+      if (location.hash !== "#/connections" || state.qqTab !== "official" || state.qqAuth !== "qr") return;
+      try { const r = await get("/connections/qq/qr"); if (r.state !== (state.qqQr && state.qqQr.state) || r.qr_svg !== (state.qqQr && state.qqQr.qr_svg)) applyQr(r); state.qqQr = r; } catch (e) { /* transient */ }
+    }, 2000);
+    state.timers.push(timer);
+  }
+
+  function applyQr(r) {
+    state.qqQr = r;
+    const area = $("#qr-area");
+    if (!area) return;
+    let html = "";
+    if (r.state === "completed") {
+      html = `<div class="badge ok">✓ 绑定成功：AppID ${esc(r.app_id || "")}</div><div class="muted small" style="margin-top:6px">正在自动保存并连接…</div>`;
+    } else if (r.state === "pending") {
+      html = `<div class="qr-box">${r.qr_svg || ""}</div>
+        <div class="muted small" style="margin-top:6px">等待扫码中…二维码过期会自动刷新${r.refreshes ? `（已刷新 ${r.refreshes} 次）` : ""}</div>
+        <div class="actions" style="margin-top:8px"><button class="btn sm" type="button" data-qrcancel>取消扫码</button></div>`;
+    } else if (r.state === "error") {
+      html = `<div class="badge bad">扫码授权失败：${esc(r.error || "未知错误")}</div>
+        <div class="actions" style="margin-top:8px"><button class="btn sm" type="button" data-qrstart>重试</button></div>`;
+    } else {
+      html = `<button class="btn primary" type="button" data-qrstart>生成二维码</button>`;
+    }
+    area.innerHTML = html;
+    const st = $("[data-qrstart]", area);
+    if (st) st.onclick = async () => { st.disabled = true; try { const rr = await post("/connections/qq/qr/start"); applyQr(rr); } catch (e) { toast(e.message, "bad"); st.disabled = false; } };
+    const cc = $("[data-qrcancel]", area);
+    if (cc) cc.onclick = async () => { try { await del("/connections/qq/qr"); applyQr({ state: "idle", qr_svg: "", refreshes: 0 }); } catch (e) { toast(e.message, "bad"); } };
+    if (r.state === "completed" && !state.qqQrSaving) {
+      state.qqQrSaving = true;
+      const save = async () => {
+        try {
+          await put("/connections/qq", { kind: "official", app_id: r.app_id, app_secret: r.app_secret });
+          toast("QQ 官方机器人已连接", "ok");
+          state.qqQrSaving = false;
+          viewConnections();
+        } catch (err) {
+          state.qqQrSaving = false;
+          toast(`自动保存失败: ${err.message}，已填入表单，请手动保存`, "bad");
+          const f = $("#fqqr");
+          if (f) { fel(f, "app_id").value = r.app_id; fel(f, "app_secret").value = r.app_secret; }
+          if (area) area.innerHTML = `<div class="badge warn">凭据已获取，请切换到「输入授权」点击「验证并保存」</div>`;
+        }
+      };
+      save();
+    }
   }
 
   function connBadge(c) {
@@ -477,7 +579,8 @@
       ["显示", ["display_mode", "timezone", "panel_title"]],
       ["性能保护", ["media_workers", "send_workers", "media_timeout_sec", "tmp_quota_mb", "tmp_ttl_min"]],
       ["文件大小策略 (MB)", ["direct_send_limit_mb", "tg_upload_limit_mb", "tg_download_limit_mb", "qq_media_limit_mb"]],
-      ["限流", ["tg_rate_per_chat_per_min", "tg_rate_global_per_sec", "qq_rate_per_chat_per_sec"]],
+      ["限流", ["tg_rate_per_chat_per_min", "tg_rate_global_per_sec", "qq_rate_per_chat_per_sec", "qqbot_rate_per_chat_per_sec"]],
+      ["QQ 官方机器人", ["public_media_base"]],
       ["行为", ["qq_voice_format", "bridge_other_bots", "event_sync_default", "telegram_api_base"]],
       ["保留", ["log_retention_rows", "message_retention_days", "media_cache_days", "session_hours"]],
     ];

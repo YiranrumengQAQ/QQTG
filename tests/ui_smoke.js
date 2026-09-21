@@ -58,6 +58,17 @@ vc.on("error", (...a) => errors.push("console.error: " + a.join(" ")));
   const fb = w.document.querySelector("#fb"); if (!fb) throw new Error("bridge form missing");
   fb.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await sleep(1200);
   const toast = w.document.querySelector(".toast"); console.log("  bridge save toast:", toast ? toast.textContent : "(none)");
+  // QQ connections: type tabs + QR scan flow
+  w.location.hash = "#/connections"; w.dispatchEvent(new w.Event("hashchange")); await sleep(1200);
+  const offTab = w.document.querySelector('[data-qqtab="official"]'); if (!offTab) throw new Error("official tab missing");
+  offTab.click(); await sleep(400);
+  if (!w.document.querySelector('[data-qqauth="qr"]')) throw new Error("qr auth tab missing");
+  w.document.querySelector('[data-qqauth="qr"]').click(); await sleep(200);
+  const qrBtn = w.document.querySelector("[data-qrstart]"); if (!qrBtn) throw new Error("qr start button missing");
+  qrBtn.click(); await sleep(1500);
+  if (!w.document.querySelector(".qr-box svg") && !w.document.querySelector(".qr-box img")) throw new Error("qr image not rendered");
+  console.log("  QQ tabs OK, QR image rendered");
+  w.document.querySelector("[data-qrcancel]").click(); await sleep(300);
   // settings save roundtrip
   w.location.hash = "#/settings"; w.dispatchEvent(new w.Event("hashchange")); await sleep(1500);
   const fs = w.document.querySelector("#fs"); fs.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await sleep(1200);
