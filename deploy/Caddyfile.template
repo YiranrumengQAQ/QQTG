@@ -1,0 +1,11 @@
+# QQTG Bridge - Caddy site block (installed to /etc/caddy/Caddyfile by install.sh)
+# Caddy obtains and renews the HTTPS certificate automatically.
+__DOMAIN__ {
+    encode gzip
+    reverse_proxy 127.0.0.1:__PORT__
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+}

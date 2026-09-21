@@ -1,0 +1,23 @@
+# QQTG Bridge - nginx server block (manual alternative to Caddy)
+# 1. Save as /etc/nginx/sites-available/qqtg-bridge and enable it
+# 2. Obtain a certificate: certbot --nginx -d __DOMAIN__
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+
+    client_max_body_size 64m;
+
+    location / {
+        proxy_pass http://127.0.0.1:__PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # WebSocket (OneBot reverse mode)
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300s;
+    }
+}
