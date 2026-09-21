@@ -170,21 +170,59 @@ def build_router(app: BridgeApp) -> APIRouter:
     @router.put("/connections/qq")
     async def qq_save(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
         data = await body(request)
-        mode = str(data.get("mode", "forward"))
-        ws_url = str(data.get("ws_url", "")).strip()
-        access_token = str(data.get("access_token", "")).strip()
+        kind = str(data.get("kind") or "").strip() or ("official" if data.get("app_id") else "onebot")
         existing = await app.get_connection(PLATFORM_QQ)
-        if not access_token and existing and data.get("keep_token", True):
-            access_token = existing["config"].get("access_token", "")
-        if mode == "forward" and not (ws_url.startswith("ws://") or ws_url.startswith("wss://")):
-            raise HTTPException(400, "正向 WebSocket 地址需以 ws:// 或 wss:// 开头")
         try:
-            await app.save_connection(PLATFORM_QQ, {"mode": mode, "ws_url": ws_url, "access_token": access_token}, name="OneBot v11")
+            if kind == "official":
+                app_id = str(data.get("app_id", "")).strip()
+                app_secret = str(data.get("app_secret", "")).strip()
+                api_base = str(data.get("api_base", "")).strip()
+                if not app_id:
+                    raise HTTPException(400, "请填写 AppID")
+                if not app_secret and existing and existing.get("config", {}).get("kind") == "official":
+                    app_secret = existing["config"].get("app_secret", "")
+                if not app_secret:
+                    raise HTTPException(400, "请填写 AppSecret（或使用扫码授权获取）")
+                if len(app_id) > 64 or len(app_secret) > 256:
+                    raise HTTPException(400, "AppID / AppSecret 格式不正确")
+                bot = await app.save_qqbot_official(app_id, app_secret, api_base)
+                log.info("QQ 官方机器人已配置: AppID=%s bot=%s", app_id, bot.get("username"))
+                return {"ok": True, "kind": "official", "bot": bot}
+            mode = str(data.get("mode", "forward"))
+            ws_url = str(data.get("ws_url", "")).strip()
+            access_token = str(data.get("access_token", "")).strip()
+            if not access_token and existing and data.get("keep_token", True) and existing.get("config", {}).get("kind") != "official":
+                access_token = existing["config"].get("access_token", "")
+            if mode == "forward" and not (ws_url.startswith("ws://") or ws_url.startswith("wss://")):
+                raise HTTPException(400, "正向 WebSocket 地址需以 ws:// 或 wss:// 开头")
+            await app.save_connection(PLATFORM_QQ, {"kind": "onebot", "mode": mode, "ws_url": ws_url, "access_token": access_token}, name="OneBot v11")
             await app.start_adapter(PLATFORM_QQ)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise wrap_error(exc)
         log.info("QQ (OneBot) 连接已配置: mode=%s", mode)
+        return {"ok": True, "kind": "onebot"}
+
+    # --------------------------------------------- QQ 官方机器人扫码授权
+    @router.post("/connections/qq/qr/start")
+    async def qq_qr_start(request: Request, sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
+        try:
+            await app.qq_qr.start()
+        except Exception as exc:
+            raise wrap_error(exc)
+        log.info("QQ 官方机器人扫码授权会话已创建 (%s)", client_ip(request))
+        return {"ok": True, **app.qq_qr.payload()}
+
+    @router.get("/connections/qq/qr")
+    async def qq_qr_status(sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
+        return {"ok": True, **app.qq_qr.payload()}
+
+    @router.delete("/connections/qq/qr")
+    async def qq_qr_cancel(sess: dict[str, Any] = Depends(owner_dep)) -> dict[str, Any]:
+        await app.qq_qr.cancel()
         return {"ok": True}
+
 
     @router.post("/connections/{platform}/restart")
     async def conn_restart(platform: str, sess: dict[str, Any] = Depends(admin_dep)) -> dict[str, Any]:
@@ -382,6 +420,10 @@ def build_router(app: BridgeApp) -> APIRouter:
                     if platform == PLATFORM_TG:
                         a.limiter.reconfigure(float(app.settings.get("tg_rate_global_per_sec")), float(app.settings.get("tg_rate_per_chat_per_min")) / 60.0, 5)
                         a.bridge_other_bots = bool(app.settings.get("bridge_other_bots"))
+                    elif getattr(a, "kind", "onebot") == "official":
+                        a.limiter.reconfigure(1.0, float(app.settings.get("qqbot_rate_per_chat_per_sec")), 2)
+                        if hasattr(a, "public_base"):
+                            a.public_base = app.effective_public_base()
                     else:
                         a.limiter.reconfigure(10, float(app.settings.get("qq_rate_per_chat_per_sec")), 3)
         log.info("设置已更新: %s", ", ".join(changed))

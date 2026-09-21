@@ -46,6 +46,23 @@ def create_app(bridge: BridgeApp) -> FastAPI:
         response.headers.setdefault("Cache-Control", "no-store" if request.url.path.startswith("/api") else "no-cache")
         return response
 
+    # ---- public media endpoint for the official QQ bot ----------------------
+    # Official bots upload rich media by URL: QQ servers fetch a signed,
+    # short-lived link pointing at a file inside the bridge tmp directory.
+    @app.get("/qqbot/media", include_in_schema=False)
+    async def qqbot_media(p: str = "", e: int = 0, n: str = "", s: str = ""):
+        from ..security import verify_media_token
+        if not p or not s or not bridge.cfg.secret_key:
+            return JSONResponse({"ok": False, "error": "invalid media link"}, status_code=403)
+        if not verify_media_token(bridge.cfg.secret_key, p, int(e or 0), n, s):
+            log.warning("QQ 媒体链接校验失败或已过期")
+            return JSONResponse({"ok": False, "error": "link expired or invalid"}, status_code=403)
+        root = bridge.cfg.tmp_dir.resolve()
+        target = (root / p).resolve()
+        if not str(target).startswith(str(root) + "/") or not target.is_file():
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        return FileResponse(target, filename=n or target.name, headers={"Cache-Control": "no-store"})
+
     # ---- OneBot v11 reverse WebSocket -------------------------------------
     async def onebot_ws(ws: WebSocket) -> None:
         adapter = bridge.engine.adapter(PLATFORM_QQ) if bridge.engine else None

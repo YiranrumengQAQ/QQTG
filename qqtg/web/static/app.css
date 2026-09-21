@@ -212,3 +212,15 @@ pre.pre { background: var(--bg); padding: 10px 12px; border-radius: 8px; overflo
 .sparkline { display: flex; align-items: flex-end; gap: 4px; height: 44px; }
 .sparkline .bar { flex: 1; background: var(--primary-weak); border-radius: 3px 3px 0 0; position: relative; min-height: 2px; }
 .sparkline .bar i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--primary); border-radius: 3px 3px 0 0; }
+
+/* segmented control (QQ connection type & auth method) */
+.seg { display: inline-flex; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 3px; }
+.seg-btn { border: 0; background: transparent; color: var(--muted); padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 500; font-size: 13px; white-space: nowrap; }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--panel); color: var(--primary); font-weight: 600; box-shadow: var(--shadow); }
+.seg-btn.sm { padding: 5px 11px; font-size: 12.5px; }
+
+/* QR code box for scan authorization */
+.qr-box { display: inline-flex; padding: 10px; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+.qr-box svg { width: 208px; height: 208px; display: block; }
+@media (prefers-color-scheme: dark) { .qr-box { background: #fff; } }

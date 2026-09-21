@@ -15,6 +15,7 @@ from typing import Any, Optional
 from .. import __version__
 from ..adapters.base import BaseAdapter, PermissionReport
 from ..adapters.onebot import OneBotAdapter
+from ..adapters.qqbot import QQOfficialAdapter
 from ..adapters.telegram import TelegramAdapter
 from ..config import Config
 from ..db import Database
@@ -23,7 +24,8 @@ from ..media.ffmpeg import FFmpeg
 from ..media.processor import MediaProcessor
 from ..media.storage import TempStorage
 from ..models import PLATFORM_LABEL, PLATFORM_QQ, PLATFORM_TG, BridgeError
-from ..security import SecretBox, hash_password, mask_secret, new_token, sha256_hex
+from ..qqbotqr import QQQRSession
+from ..security import SecretBox, hash_password, mask_secret, new_token, sha256_hex, sign_media_token
 from ..settings import Settings
 from .engine import BridgeEngine, merge_options
 
@@ -48,6 +50,7 @@ class BridgeApp:
         self.engine: BridgeEngine | None = None
         self._adapter_lock = asyncio.Lock()
         self._maintenance: asyncio.Task | None = None
+        self.qq_qr = QQQRSession()
         self.started_at = 0.0
 
     # ------------------------------------------------------------ lifecycle
@@ -72,6 +75,7 @@ class BridgeApp:
     async def stop(self) -> None:
         if self._maintenance:
             self._maintenance.cancel()
+        await self.qq_qr.cancel()
         if self.engine:
             for adapter in list(self.engine.adapters.values()):
                 try:
@@ -139,8 +143,12 @@ class BridgeApp:
             cfg = row["config"]
             if platform == PLATFORM_TG:
                 out["config"] = {"token_masked": mask_secret(cfg.get("token", "")), "api_base": cfg.get("api_base", "")}
+            elif cfg.get("kind") == "official":
+                out["config"] = {"kind": "official", "app_id": cfg.get("app_id", ""),
+                                 "app_secret_masked": mask_secret(cfg.get("app_secret", "")),
+                                 "api_base": cfg.get("api_base", "")}
             else:
-                out["config"] = {"mode": cfg.get("mode", "forward"), "ws_url": cfg.get("ws_url", ""),
+                out["config"] = {"kind": "onebot", "mode": cfg.get("mode", "forward"), "ws_url": cfg.get("ws_url", ""),
                                  "access_token_masked": mask_secret(cfg.get("access_token", ""))}
             out["self_id"] = row.get("self_id")
             out["self_name"] = row.get("self_name")
@@ -161,8 +169,57 @@ class BridgeApp:
                                 rate_chat_per_min=float(self.settings.get("tg_rate_per_chat_per_min", 20)))
             a.bridge_other_bots = bool(self.settings.get("bridge_other_bots", False))
             return a
+        if cfg.get("kind") == "official":
+            return QQOfficialAdapter(cfg.get("app_id", ""), cfg.get("app_secret", ""), api_base=cfg.get("api_base", ""),
+                                     public_base=self.effective_public_base(),
+                                     rate_chat_per_sec=float(self.settings.get("qqbot_rate_per_chat_per_sec", 0.33)),
+                                     media_url_maker=self.make_media_url)
         return OneBotAdapter(cfg.get("mode", "forward"), cfg.get("ws_url", "ws://127.0.0.1:3001"), cfg.get("access_token", ""),
                              rate_chat_per_sec=float(self.settings.get("qq_rate_per_chat_per_sec", 1.5)))
+
+    # ------------------------------------------------------ official QQ bot
+    def effective_public_base(self) -> str:
+        """Public base URL used when handing media to the official QQ servers."""
+        return str(self.settings.get("public_media_base") or self.cfg.public_url or "").strip().rstrip("/")
+
+    def make_media_url(self, absolute_path: str, name: str, ttl_sec: int) -> str:
+        """Signed, expiring URL the QQ servers can fetch for rich media upload."""
+        from urllib.parse import quote
+        base = self.effective_public_base()
+        if not base:
+            raise BridgeError("MEDIA_NO_PUBLIC_URL", "未配置公网地址，官方机器人无法发送媒体", permanent=True)
+        try:
+            rel = str(Path(absolute_path).resolve().relative_to(self.cfg.tmp_dir.resolve()))
+        except ValueError as exc:
+            raise BridgeError("MEDIA_NO_PUBLIC_URL", "媒体文件不在临时目录内", permanent=True) from exc
+        expires = int(time.time()) + max(60, ttl_sec)
+        sig = sign_media_token(self._require_secret_key(), rel, expires, name)
+        return f"{base}/qqbot/media?p={quote(rel)}&e={expires}&n={quote(name)}&s={sig}"
+
+    def _require_secret_key(self) -> str:
+        if not self.cfg.secret_key:
+            raise BridgeError("NO_SECRET", "QQTG_SECRET_KEY 未配置", permanent=True)
+        return self.cfg.secret_key
+
+    async def test_qqbot_credentials(self, app_id: str, app_secret: str, api_base: str = "") -> dict[str, Any]:
+        adapter = QQOfficialAdapter(app_id, app_secret, api_base=api_base)
+        try:
+            me = await adapter.me()
+            return {"ok": True, "id": me.get("id"), "username": me.get("username"), "avatar": me.get("avatar", "")}
+        except BridgeError as exc:
+            return {"ok": False, "error": exc.message}
+        finally:
+            if adapter._http:
+                await adapter._http.aclose()
+
+    async def save_qqbot_official(self, app_id: str, app_secret: str, api_base: str = "") -> dict[str, Any]:
+        test = await self.test_qqbot_credentials(app_id, app_secret, api_base)
+        if not test.get("ok"):
+            raise BridgeError("UNAUTHORIZED", str(test.get("error") or "AppID/AppSecret 验证失败"), permanent=True)
+        await self.save_connection(PLATFORM_QQ, {"kind": "official", "app_id": app_id, "app_secret": app_secret,
+                                                 "api_base": api_base}, name=str(test.get("username") or "QQ 官方机器人"))
+        await self.start_adapter(PLATFORM_QQ)
+        return test
 
     async def start_adapter(self, platform: str) -> Optional[BaseAdapter]:
         assert self.engine
@@ -172,6 +229,10 @@ class BridgeApp:
             if not row or not row["enabled"] or not row["config"]:
                 return None
             adapter = self._build_adapter(platform, row["config"])
+            if platform == PLATFORM_QQ and hasattr(adapter, "seed_chats"):
+                known = await self.db.fetchall(
+                    "SELECT chat_id, title FROM chats WHERE platform=? AND status NOT IN ('rejected','disabled')", (PLATFORM_QQ,))
+                adapter.seed_chats(known)
             self.engine.register_adapter(adapter)
             try:
                 await adapter.start()
@@ -458,7 +519,7 @@ class BridgeApp:
 
         qq = self.engine.adapter(PLATFORM_QQ)
         tg = self.engine.adapter(PLATFORM_TG)
-        add("QQ Connection", bool(qq and qq.connected), (qq.last_error if qq else "未配置") if not (qq and qq.connected) else f"{qq.self_name} ({qq.self_id})")
+        add("QQ Connection", bool(qq and qq.connected), (qq.last_error if qq else "未配置") if not (qq and qq.connected) else f"[{getattr(qq, 'kind_label', 'QQ')}] {qq.self_name} ({qq.self_id})")
         add("TG Connection", bool(tg and tg.connected), (tg.last_error if tg else "未配置") if not (tg and tg.connected) else f"@{tg.self_name}")
         add("Database", await self.db.ping(), str(self.cfg.db_path))
         try:

@@ -3,11 +3,38 @@
 一个自托管的 QQ 群 ↔ Telegram 群双向消息桥接系统：**一条命令安装**，通过 **Web 面板** 完成全部配置，无需编辑配置文件。
 
 ```
-QQ 群 ──► NapCat (OneBot v11) ──► Bridge Core ──► Telegram Bot API ──► Telegram 群
-QQ 群 ◄── NapCat (OneBot v11) ◄── Bridge Core ◄── Telegram Bot API ◄── Telegram 群
-                                       │
-                                  Web 管理面板
+QQ 群 ──► QQ 接入（二选一）                Bridge Core ──► Telegram Bot API ──► Telegram 群
+          ├─ 个人账号 · OneBot v11 (NapCat)        │
+          └─ QQ 官方机器人 (q.qq.com)         Web 管理面板
+QQ 群 ◄──────────────────────────────────── Bridge Core ◄── Telegram Bot API ◄── Telegram 群
 ```
+
+## QQ 接入方式（二选一）
+
+在面板「连接」页选择 QQ 接入类型：
+
+### 1. 个人账号（内置 OneBot v11）— 推荐，功能最全
+
+通过 [NapCat](https://napneko.github.io/) / LLOneBot / Lagrange 等 OneBot v11 实现登录个人 QQ 号当作机器人，支持全部消息类型（图片 / 语音 / 视频 / 文件 / 贴纸 / 合并转发等）：
+
+- **正向模式（推荐，默认）**：在 NapCat 网络配置中新建 **WebSocket 服务器**（端口如 3001，可设 token），把 `ws://127.0.0.1:3001` 与 token 填入面板；
+- **反向模式**：在 NapCat 新建 **WebSocket 客户端**，地址填 `ws://<面板地址>/onebot/v11/ws`，并在面板选择"反向 WebSocket"。
+
+### 2. QQ 官方机器人（q.qq.com）
+
+接入在 [QQ 开放平台](https://q.qq.com) 创建的**正式机器人**（Bot API v2，WebSocket 网关），支持两种授权方式：
+
+- **扫码授权**：面板显示二维码 → 手机 QQ「扫一扫」→ 选择要绑定的机器人并确认 → 自动获取 AppID / AppSecret 并连接（与官方 Agent 接入的扫码绑定协议一致，二维码过期自动刷新）；
+- **输入授权**：直接粘贴开放平台「开发设置」里的 AppID / AppSecret，保存时自动验证（`GET /users/@me`）。
+
+平台限制（由 QQ 官方接口决定）：
+
+- 群内只能收到 **@机器人** 的消息（除非群主在群设置中开启"获取全部消息"）；
+- 回复需在收到消息后 **5 分钟**内（被动回复，每条消息最多回复 5 次，桥接会自动携带 `msg_id`/`msg_seq`）；窗口外的消息走主动消息，受平台配额限制；
+- 富媒体（图片 / 视频 / 文件）通过官方 `/v2/groups/{openid}/files` 接口以 URL 方式上传，**需要在「系统 → 设置」配置公网媒体地址**（面板必须能被 QQ 服务器访问）；桥接会生成带签名、10 分钟有效的临时链接；
+- 官方语音仅接受 silk 编码，TG 语音会以**文件**形式发送；官方接口不提供群列表，群与机器人互动后自动出现在「群组」页，也支持手动添加 `group_openid`。
+
+两种方式的切换随时可做（保存即生效），桥接配置保留；官方机器人的群以 `group_openid` 标识，与个人账号的群号互不相通。
 
 ## 特性
 
@@ -18,8 +45,8 @@ QQ 群 ◄── NapCat (OneBot v11) ◄── Bridge Core ◄── Telegram Bo
 - **零残留存储**：媒体只经过临时目录（TTL + 配额 + 启动/定时清理），内容哈希 → Telegram `file_id` 缓存，重复图片不重复上传
 - **三层防循环 + 去重**：自身消息过滤、消息映射表反查、`(平台, 群, 消息 ID)` 唯一约束
 - **回复 / 撤回 / 编辑同步**（可按桥接开关），发送者显示模式：简洁 / 标准 / 完整
-- **稳定性**：优先级队列、FFmpeg 并发限制（默认 1，按 CPU/内存推荐）、Telegram 限流与 429 退避、1s/5s/30s 重试、断线自动指数退避重连、`systemd Restart=always`
-- **安全**：Bot Token 加密存储（面板仅显示掩码）、日志自动脱敏、面板默认仅监听 `127.0.0.1` 并由 Caddy 提供 HTTPS、登录 5 次失败锁定 15 分钟、CSRF、Owner / Admin / Viewer 三级权限、首次访问需初始化令牌
+- **稳定性**：优先级队列、FFmpeg 并发限制（默认 1，按 CPU/内存推荐）、Telegram 限流与 429 退避、1s/5s/30s 重试、断线自动指数退避重连（官方机器人支持 access_token 自动刷新与网关重连）、`systemd Restart=always`
+- **安全**：Bot Token / AppSecret 加密存储（面板仅显示掩码）、日志自动脱敏、媒体临时链接 HMAC 签名 + 有效期、面板默认仅监听 `127.0.0.1` 并由 Caddy 提供 HTTPS、登录 5 次失败锁定 15 分钟、CSRF、Owner / Admin / Viewer 三级权限、首次访问需初始化令牌
 - **可观测**：System Health、消息处理时间线、分类日志、一键诊断、失败消息重试
 
 ## 安装
@@ -84,10 +111,12 @@ systemctl status qqtg-bridge ; journalctl -u qqtg-bridge -f
 
 1. **连接 Telegram**：向 [@BotFather](https://t.me/BotFather) 创建机器人，复制 Token 到「连接」页 → 验证并保存。
    建议在 BotFather 里执行 `/setprivacy` → **Disable**，否则机器人收不到普通群消息（或把机器人设为群管理员）。
-2. **连接 QQ**：安装任意 OneBot v11 实现（推荐 [NapCat](https://napneko.github.io/)，也支持 LLOneBot / Lagrange），登录 QQ 后：
-   - 正向模式（推荐，默认）：在 NapCat 网络配置中新建 **WebSocket 服务器**（端口如 3001，可设 token），把 `ws://127.0.0.1:3001` 与 token 填入面板；
-   - 反向模式：在 NapCat 新建 **WebSocket 客户端**，地址填 `ws://<面板地址>/onebot/v11/ws`，并在面板选择"反向 WebSocket"。
-3. **发现群组**：QQ 群会自动从机器人的群列表读取；Telegram 群把机器人拉进群后在群里发送 `/bridge`（QQ 群也可以）。申请会出现在「群组」页的 **待授权** 列表。
+2. **连接 QQ**（「连接」页选择类型）：
+   - **个人账号（内置 OneBot）**：安装任意 OneBot v11 实现（推荐 [NapCat](https://napneko.github.io/)，也支持 LLOneBot / Lagrange），登录 QQ 后：
+     - 正向模式（推荐，默认）：在 NapCat 网络配置中新建 **WebSocket 服务器**（端口如 3001，可设 token），把 `ws://127.0.0.1:3001` 与 token 填入面板；
+     - 反向模式：在 NapCat 新建 **WebSocket 客户端**，地址填 `ws://<面板地址>/onebot/v11/ws`，并在面板选择"反向 WebSocket"。
+   - **QQ 官方机器人**：在 [q.qq.com](https://q.qq.com) 创建机器人后，选择「扫码授权」（手机 QQ 扫码即连）或「输入授权」（粘贴 AppID / AppSecret）。发媒体需在「系统」页配置公网媒体地址。
+3. **发现群组**：个人账号的 QQ 群会自动从机器人的群列表读取；官方机器人的群在群内 **@机器人** 后自动出现（或手动添加 `group_openid`）；Telegram 群把机器人拉进群后在群里发送 `/bridge`（QQ 群也可以）。申请会出现在「群组」页的 **待授权** 列表。
 4. **创建桥接**：「桥接 → 创建桥接」选择 QQ 群 → 选择 TG 群 → 设置方向 / 媒体类型 / 显示模式 → 自动检查双方权限 → 发送测试消息 → **启用**。
    新群、新桥接默认**不转发**，必须由管理员确认启用。
 
@@ -146,18 +175,23 @@ qqtg/
 ├── config.py / settings.py     启动配置 & 运行时设置
 ├── db.py                       SQLite + 迁移（chats / bridges / messages / message_mapping / media_cache …）
 ├── models.py                   UnifiedMessage / Media / SendResult
-├── security.py / logsys.py     Token 加密、密码、脱敏日志
-├── adapters/onebot.py          OneBot v11（正向 / 反向 WS）
+├── security.py / logsys.py     Token 加密、密码、脱敏日志、媒体链接签名
+├── qqbotqr.py                  QQ 官方机器人扫码授权协议（create_bind_task / poll / AES-GCM）+ 二维码
+├── adapters/onebot.py          QQ 个人账号：OneBot v11（正向 / 反向 WS）
+├── adapters/qqbot.py           QQ 官方机器人：Bot API v2（网关 WS、access_token 刷新、被动/主动回复、富媒体）
 ├── adapters/telegram.py        Telegram Bot API（长轮询、限流、file_id）
 ├── media/                      类型嗅探、FFmpeg、临时存储、转换策略
 ├── core/engine.py              路由、去重、防循环、队列、重试、映射
-├── core/app.py                 应用容器：连接 / 群组 / 桥接管理、健康、诊断、备份
-└── web/                        FastAPI API + 单页管理面板（无构建步骤）
+├── core/app.py                 应用容器：连接 / 群组 / 桥接管理、扫码会话、健康、诊断、备份
+└── web/                        FastAPI API + 单页管理面板（无构建步骤）+ /qqbot/media 签名媒体端点
 ```
 
 ## 常见问题
 
 - **Telegram 收不到普通群消息** → BotFather `/setprivacy` 设为 Disable，或把机器人设为管理员；改动后需把机器人移出再拉回群。
+- **官方机器人收不到群消息 / 不回复** → 群里必须 **@机器人**；回复窗口为收到消息后 5 分钟内、每条消息最多 5 次；窗口外的主动消息受平台配额限制（一般每群每月 4 条，需在开放平台申请）。
+- **官方机器人发不出图片 / 视频 / 文件** → 在「系统 → 设置」填写「公网媒体地址」（必须为 QQ 服务器可访问的 https 地址，例如 Caddy 域名）；图片 ≤10MB、视频/文件 ≤100MB；语音以文件形式发送（官方仅接受 silk 编码）。
+- **扫码授权二维码刷不出来** → 检查服务器能否访问 `q.qq.com`；二维码过期会自动刷新，也可点击「取消扫码」重新生成。
 - **服务器在中国大陆无法访问 api.telegram.org** → 需要自行处理网络，或在面板「连接」里填写自建 Bot API Server 地址。
 - **大于 10MB 的媒体发到 QQ 失败** → 大文件通过 `file://` 路径交给 NapCat，需要 NapCat 与 Bridge 在同一台机器且能读取 `/opt/qqtg-bridge/tmp`（Docker 需挂载同路径）。
 - **语音 / 贴纸 / GIF 不转换** → 面板「一键诊断」查看 FFmpeg 状态；`apt install ffmpeg` 后重启服务。

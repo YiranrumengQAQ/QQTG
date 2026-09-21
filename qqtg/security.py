@@ -7,6 +7,7 @@ import hmac
 import os
 import re
 import secrets
+import time
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -67,6 +68,20 @@ _TG_TOKEN_RE = re.compile(r"\b(\d{6,12}):([A-Za-z0-9_-]{30,})\b")
 _TG_FILE_URL_RE = re.compile(r"(/file/bot)(\d+):([A-Za-z0-9_-]+)")
 _ACCESS_TOKEN_RE = re.compile(r"(access_token=)([^&\s\"']+)", re.IGNORECASE)
 _BEARER_RE = re.compile(r"(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})")
+
+
+def sign_media_token(secret_key: str, rel_path: str, expires: int, name: str = "") -> str:
+    """HMAC signature for a temporary /qqbot/media download link."""
+    msg = f"{rel_path}|{expires}|{name}"
+    key = hashlib.sha256(("qqtg-media:" + secret_key).encode("utf-8")).digest()
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_media_token(secret_key: str, rel_path: str, expires: int, name: str, token: str) -> bool:
+    if expires < time.time():
+        return False
+    expected = sign_media_token(secret_key, rel_path, expires, name)
+    return hmac.compare_digest(expected, token or "")
 
 
 def redact(text: str) -> str:

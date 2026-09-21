@@ -453,9 +453,11 @@ class BridgeEngine:
         elif name == "qq_connected":
             adapter = self.adapters.get(PLATFORM_QQ)
             if adapter:
-                for info in await adapter.list_chats():
+                infos = await adapter.list_chats()
+                for info in infos:
                     await self.upsert_chat(PLATFORM_QQ, info, force=True)
-                await self._restore_left_chats(PLATFORM_QQ, {c.chat_id for c in await adapter.list_chats()})
+                if getattr(adapter, "authoritative_group_list", True):
+                    await self._restore_left_chats(PLATFORM_QQ, {c.chat_id for c in infos})
         elif name == "bot_left":
             await self._mark_chat_status(platform, data["chat_id"], "left", data.get("reason", ""))
             slog.warning("%s 机器人离开群 %s", PLATFORM_LABEL.get(platform), data["chat_id"])

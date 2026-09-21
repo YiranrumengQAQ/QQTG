@@ -102,6 +102,8 @@ class _StarletteWS:
 
 class OneBotAdapter(BaseAdapter):
     platform = PLATFORM_QQ
+    kind = "onebot"
+    kind_label = "个人账号 (OneBot v11)"
 
     def __init__(self, mode: str = "forward", ws_url: str = "ws://127.0.0.1:3001", access_token: str = "",
                  rate_chat_per_sec: float = 1.5):
