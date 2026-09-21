@@ -19,7 +19,7 @@ from typing import Awaitable, Callable, Optional
 
 from ..db import Database
 from ..logsys import get_logger
-from ..models import PLATFORM_QQ, PLATFORM_TG, BridgeError, Media, MediaKind
+from ..models import PLATFORM_TG, BridgeError, Media, MediaKind
 from ..settings import Settings
 from .detect import Sniff, safe_filename, sniff_file
 from .ffmpeg import FFmpeg
@@ -150,7 +150,7 @@ class MediaProcessor:
                 return p
 
         # Size policy against the target platform.
-        limit_mb = int(self.settings.get("tg_upload_limit_mb" if target_platform == PLATFORM_TG else "qq_media_limit_mb", 50))
+        limit_mb = int(self.settings.get("tg_upload_limit_mb", 50)) if target_platform == PLATFORM_TG else 50
         if size > limit_mb * 1024 * 1024:
             return self._fallback(
                 media,
@@ -162,7 +162,7 @@ class MediaProcessor:
                 if target_platform == PLATFORM_TG:
                     prepared = await self._prepare_for_telegram(media, str(path), sniff, job_dir)
                 else:
-                    prepared = await self._prepare_for_qq(media, str(path), sniff, job_dir)
+                    prepared = await self._prepare_generic(media, str(path), sniff, job_dir)
         except BridgeError as exc:
             return self._fallback(media, exc.message, extra_steps=[exc.code])
         except Exception as exc:
@@ -197,15 +197,8 @@ class MediaProcessor:
         return p
 
     def _target_kind_guess(self, media: Media, target: str) -> MediaKind:
-        if target == PLATFORM_TG:
-            if media.kind == MediaKind.STICKER:
-                return MediaKind.PHOTO
-            return media.kind
-        # QQ
-        if media.kind in (MediaKind.STICKER, MediaKind.ANIMATION):
+        if media.kind == MediaKind.STICKER:
             return MediaKind.PHOTO
-        if media.kind == MediaKind.AUDIO:
-            return MediaKind.DOCUMENT
         return media.kind
 
     async def _probe_into(self, prepared: Prepared, path: str) -> None:
@@ -214,7 +207,7 @@ class MediaProcessor:
         prepared.height = prepared.height or info.height
         prepared.duration = prepared.duration or info.duration
 
-    # -- QQ -> Telegram ----------------------------------------------------------------
+    # -- -> Telegram ---------------------------------------------------------------------
     async def _prepare_for_telegram(self, media: Media, path: str, sniff: Sniff, job_dir: Path) -> Prepared:
         size = os.path.getsize(path)
         kind = media.kind
@@ -361,118 +354,23 @@ class MediaProcessor:
         ratio = max(w, h) / max(1, min(w, h))
         return ratio <= TG_PHOTO_MAX_RATIO
 
-    # -- Telegram -> QQ ----------------------------------------------------------------
-    async def _prepare_for_qq(self, media: Media, path: str, sniff: Sniff, job_dir: Path) -> Prepared:
+    # -- -> generic (future adapters) ------------------------------------------------
+    async def _prepare_generic(self, media: Media, path: str, sniff: Sniff, job_dir: Path) -> Prepared:
+        """Minimal no-conversion preparation used for platforms without a
+        dedicated adapter pipeline: deliver files verbatim, images as photos.
+        Replace/extend once the next platform adapter lands."""
         size = os.path.getsize(path)
         kind = media.kind
         p = Prepared(kind=kind, original=media, path=path, mime=sniff.mime, size=size,
                      width=media.width, height=media.height, duration=media.duration)
-
-        if kind == MediaKind.PHOTO:
-            if sniff.category in ("image", "animation"):
-                return p
-            p.kind = MediaKind.DOCUMENT
+        if kind in (MediaKind.PHOTO, MediaKind.STICKER, MediaKind.ANIMATION):
+            p.kind = MediaKind.PHOTO if sniff.category in ("image", "animation") else MediaKind.DOCUMENT
+            p.filename = safe_filename(media.filename, f"file.{sniff.ext}")
             return p
-
-        if kind == MediaKind.STICKER:
-            p.kind = MediaKind.PHOTO
-            if media.is_animated:
-                # .tgs (lottie) cannot be rendered without a lottie engine: use the
-                # static preview Telegram provides, otherwise a text fallback.
-                raise BridgeError("STICKER_TGS", "动画贴纸 (TGS) 无法转换", permanent=True)
-            if media.is_video or sniff.category == "video":
-                if not self.ffmpeg.available():
-                    raise BridgeError("FFMPEG_MISSING", "视频贴纸需要 FFmpeg 转换", permanent=True)
-                out = str(job_dir / "sticker.gif")
-                await self.ffmpeg.to_gif(path, out, max_width=320, fps=15, max_seconds=6)
-                p.path, p.mime, p.filename = out, "image/gif", "sticker.gif"
-                p.steps.append("webm → gif")
-                return p
-            if sniff.ext == "webp" and self.ffmpeg.available():
-                out = str(job_dir / "sticker.png")
-                try:
-                    await self.ffmpeg.to_png(path, out)
-                    p.path, p.mime, p.filename = out, "image/png", "sticker.png"
-                    p.steps.append("webp → png")
-                except BridgeError:
-                    pass  # most OneBot implementations accept webp anyway
-            return p
-
-        if kind == MediaKind.ANIMATION:
-            p.kind = MediaKind.PHOTO
-            if sniff.ext == "gif":
-                return p
-            if not self.ffmpeg.available():
-                p.kind = MediaKind.VIDEO
-                p.steps.append("无 FFmpeg，动画按视频发送")
-                return p
-            info = await self.ffmpeg.probe(path)
-            duration = info.duration or media.duration or 0
-            if duration and duration > 20:
-                p.kind = MediaKind.VIDEO
-                p.steps.append("动画过长，按视频发送")
-                return p
-            out = str(job_dir / "animation.gif")
-            try:
-                await self.ffmpeg.to_gif(path, out, max_width=400, fps=12, max_seconds=20)
-                if os.path.getsize(out) > 8 * 1024 * 1024:
-                    raise BridgeError("GIF_TOO_BIG", "gif too big")
-                p.path, p.mime, p.filename = out, "image/gif", "animation.gif"
-                p.steps.append("mp4 → gif")
-            except BridgeError:
-                p.kind = MediaKind.VIDEO
-                p.path = path
-                p.steps.append("GIF 转换失败或过大，按视频发送")
-            return p
-
-        if kind == MediaKind.VIDEO:
-            if sniff.ext in ("mp4", "mov", "3gp"):
-                return p
-            if self.ffmpeg.available():
-                out = str(job_dir / "video.mp4")
-                info = await self.ffmpeg.probe(path)
-                try:
-                    if info.vcodec == "h264" and info.acodec in (None, "aac", "mp3"):
-                        await self.ffmpeg.remux_mp4(path, out)
-                        p.steps.append(f"{sniff.ext} → mp4 (remux)")
-                    else:
-                        await self.ffmpeg.to_mp4(path, out)
-                        p.steps.append(f"{sniff.ext} → mp4 (transcode)")
-                    p.path, p.mime, p.filename = out, "video/mp4", safe_filename(Path(media.filename or "video").stem + ".mp4")
-                    return p
-                except BridgeError as exc:
-                    p.steps.append(f"转码失败，按文件发送: {exc.code}")
-            p.kind = MediaKind.DOCUMENT
-            return p
-
-        if kind == MediaKind.VOICE:
-            fmt = str(self.settings.get("qq_voice_format", "wav"))
-            if sniff.ext == fmt:
-                return p
-            if not self.ffmpeg.available():
-                p.steps.append("无 FFmpeg，直接发送原始语音")
-                return p
-            out = str(job_dir / f"voice.{fmt}")
-            try:
-                if fmt == "wav":
-                    await self.ffmpeg.to_wav(path, out)
-                elif fmt == "mp3":
-                    await self.ffmpeg.to_mp3(path, out)
-                else:
-                    await self.ffmpeg.to_ogg_opus(path, out)
-                p.path, p.filename = out, f"voice.{fmt}"
-                p.mime = {"wav": "audio/wav", "mp3": "audio/mpeg", "ogg": "audio/ogg"}[fmt]
-                p.steps.append(f"{sniff.ext} → {fmt}")
-            except BridgeError as exc:
-                p.steps.append(f"语音转换失败，发送原始文件: {exc.code}")
-            return p
-
-        if kind == MediaKind.AUDIO:
+        if kind in (MediaKind.VOICE, MediaKind.AUDIO):
             p.kind = MediaKind.DOCUMENT
             p.filename = safe_filename(media.filename, f"audio.{sniff.ext}")
             return p
-
-        p.kind = MediaKind.DOCUMENT
         p.filename = safe_filename(media.filename, f"file.{sniff.ext}")
         return p
 

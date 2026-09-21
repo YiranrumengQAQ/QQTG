@@ -1,5 +1,5 @@
 [Unit]
-Description=QQTG Bridge (QQ <-> Telegram group bridge)
+Description=Rain Bridge (group message bridge)
 Documentation=https://github.com/YiranrumengQAQ/QQTG
 After=network-online.target
 Wants=network-online.target

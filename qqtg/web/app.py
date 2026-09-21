@@ -1,19 +1,17 @@
-"""FastAPI application: admin panel, JSON API and the OneBot reverse WebSocket."""
+"""FastAPI application: admin panel and its JSON API."""
 from __future__ import annotations
 
 import asyncio
-import hmac
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..core.app import BridgeApp
 from ..logsys import get_logger
-from ..models import PLATFORM_QQ
 from .api import build_router
 
 log = get_logger("system")
@@ -29,7 +27,7 @@ def create_app(bridge: BridgeApp) -> FastAPI:
         finally:
             await bridge.stop()
 
-    app = FastAPI(title="QQTG Bridge", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Rain Bridge", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.bridge = bridge
     app.include_router(build_router(bridge))
 
@@ -45,52 +43,6 @@ def create_app(bridge: BridgeApp) -> FastAPI:
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Cache-Control", "no-store" if request.url.path.startswith("/api") else "no-cache")
         return response
-
-    # ---- public media endpoint for the official QQ bot ----------------------
-    # Official bots upload rich media by URL: QQ servers fetch a signed,
-    # short-lived link pointing at a file inside the bridge tmp directory.
-    @app.get("/qqbot/media", include_in_schema=False)
-    async def qqbot_media(p: str = "", e: int = 0, n: str = "", s: str = ""):
-        from ..security import verify_media_token
-        if not p or not s or not bridge.cfg.secret_key:
-            return JSONResponse({"ok": False, "error": "invalid media link"}, status_code=403)
-        if not verify_media_token(bridge.cfg.secret_key, p, int(e or 0), n, s):
-            log.warning("QQ 媒体链接校验失败或已过期")
-            return JSONResponse({"ok": False, "error": "link expired or invalid"}, status_code=403)
-        root = bridge.cfg.tmp_dir.resolve()
-        target = (root / p).resolve()
-        if not str(target).startswith(str(root) + "/") or not target.is_file():
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        return FileResponse(target, filename=n or target.name, headers={"Cache-Control": "no-store"})
-
-    # ---- OneBot v11 reverse WebSocket -------------------------------------
-    async def onebot_ws(ws: WebSocket) -> None:
-        adapter = bridge.engine.adapter(PLATFORM_QQ) if bridge.engine else None
-        if adapter is None or getattr(adapter, "mode", "") != "reverse":
-            await ws.close(code=1008, reason="reverse websocket not enabled")
-            return
-        expected = getattr(adapter, "access_token", "")
-        if expected:
-            supplied = ""
-            auth = ws.headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                supplied = auth[7:].strip()
-            elif auth.lower().startswith("token "):
-                supplied = auth[6:].strip()
-            supplied = supplied or ws.query_params.get("access_token", "")
-            if not hmac.compare_digest(supplied, expected):
-                log.warning("OneBot 反向连接认证失败 (%s)", ws.client.host if ws.client else "?")
-                await ws.close(code=1008, reason="unauthorized")
-                return
-        await ws.accept()
-        log.info("OneBot 反向 WebSocket 已连接 (%s)", ws.client.host if ws.client else "?")
-        try:
-            await adapter.attach_reverse(ws)  # type: ignore[attr-defined]
-        except Exception as exc:
-            log.debug("reverse ws closed: %s", exc)
-
-    for path in ("/onebot/v11/ws", "/onebot/v11/ws/", "/onebot/v11", "/onebot/v11/", "/ws", "/"):
-        app.add_api_websocket_route(path, onebot_ws)
 
     # ---- static SPA ---------------------------------------------------------
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

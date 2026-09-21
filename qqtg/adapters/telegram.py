@@ -183,7 +183,7 @@ class TelegramAdapter(BaseAdapter):
         if chat.get("type") not in ("group", "supergroup", "channel"):
             # private chats: only answer /start with a hint
             if chat.get("type") == "private" and (msg.get("text") or "").startswith("/start"):
-                await self._safe_send_text(str(chat["id"]), "这是一个 QQ ↔ Telegram 群组桥接机器人。\n请把我添加到群组，然后在群里发送 /bridge。")
+                await self._safe_send_text(str(chat["id"]), "这是一个群组桥接机器人。\n请把我添加到群组，然后在群里发送 /bridge。")
             return
         info = ChatInfo(str(chat["id"]), chat.get("title") or str(chat["id"]), chat.get("type", "group"))
         self.chats_seen[info.chat_id] = info
@@ -653,7 +653,7 @@ def _media_label(m: dict[str, Any]) -> str:
 
 
 def _apply_entities(text: str, entities: list[dict[str, Any]]) -> str:
-    """Render text_link entities as ``text (url)`` so links survive the trip to QQ.
+    """Render text_link entities as ``text (url)`` so links survive in plain text.
     Offsets are UTF-16 code units."""
     links = [e for e in entities if e.get("type") == "text_link" and e.get("url")]
     if not links or not text:

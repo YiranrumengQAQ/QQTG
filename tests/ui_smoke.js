@@ -33,7 +33,7 @@ vc.on("error", (...a) => errors.push("console.error: " + a.join(" ")));
   if (form.querySelector("[name=setup_token]")) throw new Error("bridge still needs setup; run e2e first");
   form.querySelector("[name=username]").value = USER; form.querySelector("[name=password]").value = PASS;
   form.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true }));
-  await waitFor(".sidebar", 10000);
+  await waitFor(".nav-top", 10000);
   console.log("login OK ->", w.document.querySelector("h1").textContent);
   const routes = ["#/", "#/connections", "#/chats", "#/bridges", "#/bridges/new", "#/bridges/1", "#/messages", "#/messages?status=failed", "#/logs", "#/logs?category=message", "#/settings"];
   for (const r of routes) {
@@ -47,9 +47,9 @@ vc.on("error", (...a) => errors.push("console.error: " + a.join(" ")));
   }
   // wizard: pick chats and go to step 3
   w.location.hash = "#/bridges/new"; w.dispatchEvent(new w.Event("hashchange")); await sleep(1200);
-  let pick = w.document.querySelector("[data-pick]"); if (!pick) throw new Error("no qq chat choices");
+  let pick = w.document.querySelector("[data-pick]"); if (!pick) throw new Error("no A-side chat choices");
   pick.click(); await sleep(100); w.document.querySelector("[data-next]").click(); await sleep(200);
-  pick = w.document.querySelector("[data-pick]"); if (!pick) throw new Error("no tg chat choices");
+  pick = w.document.querySelector("[data-pick]"); if (!pick) throw new Error("no B-side chat choices");
   pick.click(); await sleep(100); w.document.querySelector("[data-next]").click(); await sleep(200);
   if (!w.document.querySelector("#w-name")) throw new Error("wizard step 3 not rendered");
   console.log("  wizard step 3 OK:", w.document.querySelector("#w-name").value);
@@ -58,17 +58,12 @@ vc.on("error", (...a) => errors.push("console.error: " + a.join(" ")));
   const fb = w.document.querySelector("#fb"); if (!fb) throw new Error("bridge form missing");
   fb.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await sleep(1200);
   const toast = w.document.querySelector(".toast"); console.log("  bridge save toast:", toast ? toast.textContent : "(none)");
-  // QQ connections: type tabs + QR scan flow
+  // connections page: Telegram card + future-platform placeholder, no QQ leftovers
   w.location.hash = "#/connections"; w.dispatchEvent(new w.Event("hashchange")); await sleep(1200);
-  const offTab = w.document.querySelector('[data-qqtab="official"]'); if (!offTab) throw new Error("official tab missing");
-  offTab.click(); await sleep(400);
-  if (!w.document.querySelector('[data-qqauth="qr"]')) throw new Error("qr auth tab missing");
-  w.document.querySelector('[data-qqauth="qr"]').click(); await sleep(200);
-  const qrBtn = w.document.querySelector("[data-qrstart]"); if (!qrBtn) throw new Error("qr start button missing");
-  qrBtn.click(); await sleep(1500);
-  if (!w.document.querySelector(".qr-box svg") && !w.document.querySelector(".qr-box img")) throw new Error("qr image not rendered");
-  console.log("  QQ tabs OK, QR image rendered");
-  w.document.querySelector("[data-qrcancel]").click(); await sleep(300);
+  const connTxt = w.document.body.textContent;
+  if (!/Telegram Bot/.test(connTxt)) throw new Error("telegram card missing");
+  if (/OneBot|官方机器人|扫码授权|AppID/i.test(connTxt)) throw new Error("QQ leftovers on connections page");
+  console.log("  connections page clean (Telegram only)");
   // settings save roundtrip
   w.location.hash = "#/settings"; w.dispatchEvent(new w.Event("hashchange")); await sleep(1500);
   const fs = w.document.querySelector("#fs"); fs.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true })); await sleep(1200);

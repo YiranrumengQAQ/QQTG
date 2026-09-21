@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  QQTG Bridge - QQ <-> Telegram 群组桥接  一键安装 / 更新 / 卸载脚本
+#  Rain Bridge - 群组桥接（Telegram 内置，未来平台可插拔） 一键安装 / 更新 / 卸载脚本
 #
 #  安装:
 #    bash <(curl -fsSL https://raw.githubusercontent.com/YiranrumengQAQ/QQTG/main/install.sh)
@@ -67,7 +67,7 @@ hr()    { printf "%s━━━━━━━━━━━━━━━━━━━━
 step()  { echo; printf "%s[%s]%s %s%s%s\n" "$C_BLUE" "$1" "$C_RESET" "$C_BOLD" "$2" "$C_RESET"; }
 banner() {
   echo; hr
-  printf " %sQQ ↔ Telegram Bridge%s  installer v%s\n" "$C_BOLD" "$C_RESET" "$QQTG_VERSION_SCRIPT"
+  printf " %sRain Bridge · 雨幕桥接%s  installer v%s\n" "$C_BOLD" "$C_RESET" "$QQTG_VERSION_SCRIPT"
   hr
 }
 
@@ -432,7 +432,7 @@ write_unit() {
   else
     cat > "$UNIT_FILE" <<EOF
 [Unit]
-Description=QQTG Bridge (QQ <-> Telegram group bridge)
+Description=Rain Bridge (group message bridge)
 After=network-online.target
 Wants=network-online.target
 [Service]
@@ -468,7 +468,7 @@ fix_perms() {
   mkdir -p "$HOME_DIR"/{config,data,logs,tmp}
   chown -R "$SVC_USER:$SVC_USER" "$HOME_DIR"
   chmod 0750 "$HOME_DIR/config" "$HOME_DIR/data" "$HOME_DIR/logs"
-  chmod 0755 "$HOME_DIR" "$HOME_DIR/tmp"   # tmp must be readable by a local NapCat for >10MB media (file:// paths)
+  chmod 0755 "$HOME_DIR" "$HOME_DIR/tmp"   # tmp must be readable by co-located services
   [ -f "$CONFIG_ENV" ] && chmod 0600 "$CONFIG_ENV" || true
 }
 
@@ -603,9 +603,7 @@ do_install() {
   printf "  接下来:\n"
   printf "   1. 打开面板 → 创建管理员\n"
   printf "   2. 连接 Telegram：向 @BotFather 申请 Bot Token（建议关闭 Group Privacy）\n"
-  printf "   3. 连接 QQ：安装 NapCat 等 OneBot v11 实现并开启 WebSocket 服务器，把地址填入面板\n"
-  printf "      NapCat: https://napneko.github.io/  （同机部署时地址通常为 ws://127.0.0.1:3001）\n"
-  printf "   4. 把两个机器人拉进各自的群 → 在群里发送 /bridge → 面板中创建桥接 → 测试 → 启用\n"
+  printf "   3. 把机器人拉进群 → 在群里发送 /bridge → 面板中创建桥接（A ↔ B）→ 测试 → 启用\n"
   echo
   printf "  常用命令:  qqtg status | qqtg diagnose | qqtg backup | systemctl status %s\n" "$SERVICE"
   printf "  升级/卸载: qqtg-install update | qqtg-install uninstall\n"

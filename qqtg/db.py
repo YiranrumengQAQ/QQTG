@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -154,6 +154,57 @@ MIGRATIONS: dict[int, list[str]] = {
             failed INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (day, bridge_id, direction, kind)
         )""",
+    ],
+    # v2: QQ support removed.  Bridges become platform-agnostic: every bridge
+    # links an "A" chat with a "B" chat (both rows in ``chats``), so a future
+    # platform only needs a new adapter – not a schema change.
+    2: [
+        """CREATE TABLE IF NOT EXISTS bridges_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            direction TEXT NOT NULL DEFAULT 'both' CHECK(direction IN ('both','a_to_b','b_to_a')),
+            a_chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            b_chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            options TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )""",
+        """INSERT INTO bridges_new (id, name, enabled, direction, a_chat_id, b_chat_id, options, created_at, updated_at)
+           SELECT id, name, enabled,
+                  CASE direction WHEN 'tg_to_qq' THEN 'b_to_a' WHEN 'qq_to_tg' THEN 'a_to_b' ELSE 'both' END,
+                  qq_chat_id, tg_chat_id, options, created_at, updated_at
+           FROM bridges""",
+        "DROP TABLE bridges",
+        "ALTER TABLE bridges_new RENAME TO bridges",
+        "CREATE INDEX IF NOT EXISTS idx_bridges_a ON bridges(a_chat_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bridges_b ON bridges(b_chat_id)",
+        # Rebuild connections without the QQ-era platform CHECK constraint and
+        # drop QQ credentials – any future platform adapter is welcome here.
+        """CREATE TABLE IF NOT EXISTS connections_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            config_enc TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            self_id TEXT,
+            self_name TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )""",
+        "INSERT INTO connections_new SELECT * FROM connections WHERE platform='telegram'",
+        "DROP TABLE connections",
+        "ALTER TABLE connections_new RENAME TO connections",
+        # QQ data goes away entirely.
+        "DELETE FROM chats WHERE platform != 'telegram'",
+        "DELETE FROM user_names WHERE platform != 'telegram'",
+        "DELETE FROM media_cache WHERE platform != 'telegram'",
+        "UPDATE messages SET direction='a_to_b' WHERE direction='qq_to_tg'",
+        "UPDATE messages SET direction='b_to_a' WHERE direction='tg_to_qq'",
+        "UPDATE stats_daily SET direction='a_to_b' WHERE direction='qq_to_tg'",
+        "UPDATE stats_daily SET direction='b_to_a' WHERE direction='tg_to_qq'",
+        """DELETE FROM settings WHERE key IN
+           ('qq_media_limit_mb','qq_rate_per_chat_per_sec','qqbot_rate_per_chat_per_sec','public_media_base','qq_voice_format')""",
     ],
 }
 

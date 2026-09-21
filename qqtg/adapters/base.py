@@ -47,10 +47,10 @@ EventHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 class BaseAdapter:
     platform: str = ""
-    # True when ``list_chats()`` is an authoritative, complete group list from
-    # the platform (OneBot).  Adapters that discover groups opportunistically
-    # (official QQ bot has no "list groups" API) must set False so the engine
-    # never marks unseen chats as "left".
+    # True when ``list_chats()`` returns an authoritative, complete group list
+    # from the platform.  Adapters that discover groups opportunistically (the
+    # platform has no "list groups" API) must set False so the engine never
+    # marks unseen chats as "left".
     authoritative_group_list: bool = True
 
     def __init__(self) -> None:

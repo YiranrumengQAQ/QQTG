@@ -11,10 +11,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
-PLATFORM_QQ = "qq"
 PLATFORM_TG = "telegram"
 
-PLATFORM_LABEL = {PLATFORM_QQ: "QQ", PLATFORM_TG: "TG"}
+PLATFORM_LABEL = {PLATFORM_TG: "TG"}
+
+
+def platform_label(platform: str) -> str:
+    """Display label for a platform; unknown future platforms fall back to their id."""
+    return PLATFORM_LABEL.get(platform, platform.upper())
 
 
 class MediaKind(str, Enum):
@@ -54,7 +58,7 @@ class Media:
     # Exactly one of the following is usually present when the message is
     # produced by an adapter.  The media processor resolves it to ``path``.
     url: Optional[str] = None
-    file_id: Optional[str] = None  # platform specific reference (TG file_id / QQ file id)
+    file_id: Optional[str] = None  # platform specific reference (e.g. TG file_id)
     path: Optional[str] = None  # local temp path after download
     mime: Optional[str] = None
     size: Optional[int] = None
